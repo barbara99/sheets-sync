@@ -2,7 +2,7 @@ name: Sync Sheets
 
 on:
   schedule:
-    - cron: "*/1 * * * *"  # runs every 30 minutes, change as needed
+    - cron: "*/5 * * * *" # runs every 30 minutes, change as needed
   workflow_dispatch:          # allows you to trigger it manually too
 
 jobs:
