@@ -148,20 +148,5 @@ def health():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
     app.run(host="0.0.0.0", port=port)
-```
 
----
-
-### `requirements.txt`
-```
-flask
-gspread
-google-auth
-gunicorn
-```
-
----
-
-### `Procfile`
-```
 web: gunicorn main:app --bind 0.0.0.0:$PORT
