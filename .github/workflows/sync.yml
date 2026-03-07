@@ -25,4 +25,6 @@ jobs:
 
       - name: Full sync to catch any missed edits
         run: |
-          curl -X POST https://sheets-sync-production.up.railway.app/sync
+            curl -X POST https://sheets-sync-production.up.railway.app/sync \
+            -H "Content-Type: application/json" \
+            -d "{}"
