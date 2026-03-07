@@ -2,7 +2,7 @@ name: Sync Sheets
 
 on:
   schedule:
-    - cron: "5 * * * *"
+    - cron: "*/20 * * * *"
   workflow_dispatch:
 
 jobs:
@@ -20,6 +20,9 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Run sync via webhook
+      - name: Ping Railway to keep it awake
+        run: curl https://sheets-sync-production.up.railway.app/
+
+      - name: Full sync to catch any missed edits
         run: |
-          curl -X POST https://YOUR-RAILWAY-URL.railway.app/sync
+          curl -X POST https://sheets-sync-production.up.railway.app/sync
