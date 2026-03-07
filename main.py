@@ -4,23 +4,15 @@ import logging
 import json
 import os
 from flask import Flask, request, jsonify
-from concurrent.futures import ThreadPoolExecutor, as_completed
 
 app = Flask(__name__)
 
 logging.basicConfig(level=logging.INFO)
 
-START_ROW    = 23
+START_ROW    = 30
 ID_COL       = 0
-MASTER_SS_ID = "1BkMncGrq2o26CF77x7ppuyM0xlOEJSA6xNeu7T5CIHQ"
+MASTER_SS_ID = "YOUR_MASTER_SPREADSHEET_ID"
 MASTER_SHEET = "Sheet7"
-
-SOURCES = [
-    {"id": "1PaYgXe2fzKkR-y-CXnei0RM2fQbCUlpVKoFAShjpX7w", "sheet": "Sheet1"},
-    {"id": "1bIsyZ2cF-uAFI3fa7G8xGL98ZK8o5Ra5WWbV0FRLD88", "sheet": "Sheet1"},
-]
-
-MAX_WORKERS = 20
 
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
@@ -44,17 +36,34 @@ def fetch_sheet(client, spreadsheet_id, sheet_name, start_row):
         logging.warning(f"Failed to fetch {spreadsheet_id}/{sheet_name}: {e}")
         return []
 
+def fetch_master(client):
+    try:
+        ss       = client.open_by_key(MASTER_SS_ID)
+        sheet    = ss.worksheet(MASTER_SHEET)
+        all_rows = sheet.get_all_values()
+        data     = all_rows[START_ROW - 1:]
+        data     = [row for row in data if any(cell.strip() for cell in row)]
+        return sheet, data
+    except Exception as e:
+        logging.error(f"Failed to fetch master: {e}")
+        return None, []
+
 @app.route("/sync", methods=["POST"])
 def sync():
     try:
+        data           = request.get_json()
+        spreadsheet_id = data.get("spreadsheetId") if data else None
+        sheet_name     = data.get("sheet") if data else None
+
         client = get_client()
 
         # Read master
         logging.info("Reading master sheet...")
-        master_ss    = client.open_by_key(MASTER_SS_ID)
-        master_sheet = master_ss.worksheet(MASTER_SHEET)
-        master_data  = fetch_sheet(client, MASTER_SS_ID, MASTER_SHEET, START_ROW)
+        master_sheet_obj, master_data = fetch_master(client)
+        if master_sheet_obj is None:
+            return jsonify({"status": "error", "message": "Could not read master sheet"}), 500
 
+        # Build master ID map
         id_to_index = {}
         for i, row in enumerate(master_data):
             id_val = row[ID_COL].strip() if len(row) > ID_COL else ""
@@ -63,38 +72,72 @@ def sync():
 
         logging.info(f"Master has {len(id_to_index)} existing IDs")
 
-        # Fetch all sources in parallel
-        def fetch_source(source):
-            return fetch_sheet(client, source["id"], source["sheet"], START_ROW)
+        # If a specific sheet was edited, only fetch that one
+        # Otherwise fetch all sources (fallback full sync)
+        if spreadsheet_id and sheet_name:
+            logging.info(f"Targeted sync for {spreadsheet_id}/{sheet_name}")
+            sources_to_fetch = [{"id": spreadsheet_id, "sheet": sheet_name}]
+        else:
+            logging.info("Full sync — no specific sheet provided")
+            sources_to_fetch = get_all_sources()
 
+        # Fetch only the relevant source(s)
         all_source_rows = {}
-        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-            futures = {executor.submit(fetch_source, source): source for source in SOURCES}
-            for future in as_completed(futures):
-                source_data = future.result()
-                for row in source_data:
-                    id_val = row[ID_COL].strip() if len(row) > ID_COL else ""
-                    if not id_val:
-                        continue
-                    all_source_rows[id_val] = row
+        for source in sources_to_fetch:
+            source_data = fetch_sheet(client, source["id"], source["sheet"], START_ROW)
+            for row in source_data:
+                id_val = row[ID_COL].strip() if len(row) > ID_COL else ""
+                if not id_val:
+                    continue
+                all_source_rows[id_val] = row
 
-        # Figure out changes
+        logging.info(f"Source rows fetched: {len(all_source_rows)}")
+
         new_rows      = []
         updates       = []
         ids_to_remove = []
 
-        for id_val, index in id_to_index.items():
-            if id_val not in all_source_rows:
-                ids_to_remove.append(index)
-            else:
-                source_row  = all_source_rows[id_val]
-                master_row  = master_data[index]
-                max_len     = max(len(source_row), len(master_row))
-                source_norm = source_row + [""] * (max_len - len(source_row))
-                master_norm = master_row + [""] * (max_len - len(master_row))
-                if source_norm != master_norm:
-                    updates.append((index, source_row))
+        # Only check IDs that came from this source for removal
+        source_ids = set(all_source_rows.keys())
 
+        # Find IDs in master that came from this source but no longer exist
+        if spreadsheet_id and sheet_name:
+            # Only remove IDs that belong to this specific source
+            # We know which IDs came from this source because we just fetched it
+            # IDs in master that are NOT in the source fetch = deleted from this source
+            master_ids_from_source = set()
+            try:
+                # Re-fetch to get full picture of what this source had before
+                # We use the source fetch we already did
+                master_ids_from_source = source_ids
+            except:
+                pass
+
+            for id_val, index in id_to_index.items():
+                if id_val in source_ids:
+                    # This ID exists in source — check for updates
+                    source_row  = all_source_rows[id_val]
+                    master_row  = master_data[index]
+                    max_len     = max(len(source_row), len(master_row))
+                    source_norm = source_row + [""] * (max_len - len(source_row))
+                    master_norm = master_row + [""] * (max_len - len(master_row))
+                    if source_norm != master_norm:
+                        updates.append((index, source_row))
+        else:
+            # Full sync — check all IDs for removal
+            for id_val, index in id_to_index.items():
+                if id_val not in all_source_rows:
+                    ids_to_remove.append(index)
+                else:
+                    source_row  = all_source_rows[id_val]
+                    master_row  = master_data[index]
+                    max_len     = max(len(source_row), len(master_row))
+                    source_norm = source_row + [""] * (max_len - len(source_row))
+                    master_norm = master_row + [""] * (max_len - len(master_row))
+                    if source_norm != master_norm:
+                        updates.append((index, source_row))
+
+        # Find new IDs
         for id_val, row in all_source_rows.items():
             if id_val not in id_to_index:
                 new_rows.append(row)
@@ -108,9 +151,10 @@ def sync():
                 reverse=True
             )
             for sheet_row in rows_to_delete:
-                master_sheet.delete_rows(sheet_row)
+                master_sheet_obj.delete_rows(sheet_row)
 
-            master_data = fetch_sheet(client, MASTER_SS_ID, MASTER_SHEET, START_ROW)
+            # Re-read master after deletions
+            _, master_data = fetch_master(client)
             id_to_index = {}
             for i, row in enumerate(master_data):
                 id_val = row[ID_COL].strip() if len(row) > ID_COL else ""
@@ -123,7 +167,7 @@ def sync():
             for index, row in updates:
                 normalized = row + [""] * (max_cols - len(row))
                 sheet_row  = START_ROW + index
-                master_sheet.update(
+                master_sheet_obj.update(
                     f"A{sheet_row}",
                     [normalized],
                     value_input_option="RAW"
@@ -133,19 +177,34 @@ def sync():
         if new_rows:
             max_cols = max(len(row) for row in new_rows)
             new_rows = [row + [""] * (max_cols - len(row)) for row in new_rows]
-            master_sheet.append_rows(new_rows, value_input_option="RAW")
+            master_sheet_obj.append_rows(new_rows, value_input_option="RAW")
 
-        return jsonify({"status": "ok", "new": len(new_rows), "updates": len(updates), "removed": len(ids_to_remove)}), 200
+        return jsonify({
+            "status": "ok",
+            "new": len(new_rows),
+            "updates": len(updates),
+            "removed": len(ids_to_remove)
+        }), 200
 
     except Exception as e:
         logging.error(f"Sync error: {e}")
         return jsonify({"status": "error", "message": str(e)}), 500
 
+
+def get_all_sources():
+    # Full list of all 600 sources for fallback full sync
+    return [
+        {"id": "1PaYgXe2fzKkR-y-CXnei0RM2fQbCUlpVKoFAShjpX7w", "sheet": "Sheet1"},
+        {"id": "1bIsyZ2cF-uAFI3fa7G8xGL98ZK8o5Ra5WWbV0FRLD88", "sheet": "Sheet1"},
+        # add all 600 sources here
+    ]
+
+
 @app.route("/", methods=["GET"])
 def health():
     return "OK", 200
 
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
     app.run(host="0.0.0.0", port=port)
-
