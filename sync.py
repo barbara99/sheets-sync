@@ -9,7 +9,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 START_ROW    = 30
 ID_COL       = 0
-MASTER_SS_ID = "YOUR_MASTER_SPREADSHEET_ID"
+MASTER_SS_ID = "1BkMncGrq2o26CF77x7ppuyM0xlOEJSA6xNeu7T5CIHQ"
 MASTER_SHEET = "Sheet7"
 
 SOURCES = [
