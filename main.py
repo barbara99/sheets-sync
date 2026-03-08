@@ -25,16 +25,22 @@ def get_client():
     return gspread.authorize(creds)
 
 def fetch_sheet(client, spreadsheet_id, sheet_name, start_row):
-    try:
-        ss       = client.open_by_key(spreadsheet_id)
-        sheet    = ss.worksheet(sheet_name)
-        all_rows = sheet.get_all_values()
-        data     = all_rows[start_row - 1:]
-        data     = [row for row in data if any(cell.strip() for cell in row)]
-        return data
-    except Exception as e:
-        logging.warning(f"Failed to fetch {spreadsheet_id}/{sheet_name}: {e}")
-        return []
+    for attempt in range(3):
+        try:
+            ss       = client.open_by_key(spreadsheet_id)
+            sheet    = ss.worksheet(sheet_name)
+            all_rows = sheet.get_all_values()
+            data     = all_rows[start_row - 1:]
+            data     = [row for row in data if any(cell.strip() for cell in row)]
+            return data
+        except Exception as e:
+            if "429" in str(e) or "quota" in str(e).lower():
+                logging.warning(f"Rate limited, waiting 30s... (attempt {attempt + 1})")
+                time.sleep(30)
+            else:
+                logging.warning(f"Failed to fetch {spreadsheet_id}/{sheet_name}: {e}")
+                return []
+    return []
 
 def fetch_master(client):
     try:
