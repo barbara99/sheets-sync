@@ -3,6 +3,7 @@ from google.oauth2.service_account import Credentials
 import logging
 import json
 import os
+import time
 from flask import Flask, request, jsonify
 
 app = Flask(__name__)
@@ -18,6 +19,9 @@ SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive"
 ]
+
+# In-memory map: ID → source spreadsheet ID
+id_to_source = {}
 
 def get_client():
     creds_json = json.loads(os.environ["GOOGLE_CREDENTIALS"])
@@ -54,8 +58,20 @@ def fetch_master(client):
         logging.error(f"Failed to fetch master: {e}")
         return None, []
 
+def chunk_sources(sources, size=50):
+    for i in range(0, len(sources), size):
+        yield sources[i:i + size]
+
+def get_all_sources():
+    return [
+        {"id": "1PaYgXe2fzKkR-y-CXnei0RM2fQbCUlpVKoFAShjpX7w", "sheet": "Sheet1"},
+        {"id": "1bIsyZ2cF-uAFI3fa7G8xGL98ZK8o5Ra5WWbV0FRLD88", "sheet": "Sheet1"},
+        # add all 600 sources here
+    ]
+
 @app.route("/sync", methods=["POST"])
 def sync():
+    global id_to_source
     try:
         data           = request.get_json()
         spreadsheet_id = data.get("spreadsheetId") if data else None
@@ -78,24 +94,42 @@ def sync():
 
         logging.info(f"Master has {len(id_to_index)} existing IDs")
 
-        # If a specific sheet was edited, only fetch that one
-        # Otherwise fetch all sources (fallback full sync)
-        if spreadsheet_id and sheet_name:
-            logging.info(f"Targeted sync for {spreadsheet_id}/{sheet_name}")
-            sources_to_fetch = [{"id": spreadsheet_id, "sheet": sheet_name}]
-        else:
-            logging.info("Full sync — no specific sheet provided")
-            sources_to_fetch = get_all_sources()
-
-        # Fetch only the relevant source(s)
+        # Fetch sources
         all_source_rows = {}
-        for source in sources_to_fetch:
-            source_data = fetch_sheet(client, source["id"], source["sheet"], START_ROW)
+
+        if spreadsheet_id and sheet_name:
+            # Targeted sync — only fetch the one sheet that changed
+            logging.info(f"Targeted sync for {spreadsheet_id}/{sheet_name}")
+            source_data = fetch_sheet(client, spreadsheet_id, sheet_name, START_ROW)
             for row in source_data:
                 id_val = row[ID_COL].strip() if len(row) > ID_COL else ""
                 if not id_val:
                     continue
                 all_source_rows[id_val] = row
+                id_to_source[id_val] = spreadsheet_id
+
+        else:
+            # Full sync — process all sources in batches of 50
+            logging.info("Full sync — fetching all sources in batches...")
+            sources   = get_all_sources()
+            completed = 0
+
+            for batch in chunk_sources(sources, size=50):
+                for source in batch:
+                    source_data = fetch_sheet(client, source["id"], source["sheet"], START_ROW)
+                    for row in source_data:
+                        id_val = row[ID_COL].strip() if len(row) > ID_COL else ""
+                        if not id_val:
+                            continue
+                        all_source_rows[id_val] = row
+                        id_to_source[id_val] = source["id"]
+                    completed += 1
+                    logging.info(f"Fetched {completed}/{len(sources)} sources")
+
+                # Pause between batches to avoid rate limits
+                if completed < len(sources):
+                    logging.info("Batch done, pausing 15 seconds...")
+                    time.sleep(15)
 
         logging.info(f"Source rows fetched: {len(all_source_rows)}")
 
@@ -103,37 +137,29 @@ def sync():
         updates       = []
         ids_to_remove = []
 
-        # Only check IDs that came from this source for removal
-        source_ids = set(all_source_rows.keys())
-
-        # Find IDs in master that came from this source but no longer exist
         if spreadsheet_id and sheet_name:
-            # Only remove IDs that belong to this specific source
-            # We know which IDs came from this source because we just fetched it
-            # IDs in master that are NOT in the source fetch = deleted from this source
-            master_ids_from_source = set()
-            try:
-                # Re-fetch to get full picture of what this source had before
-                # We use the source fetch we already did
-                master_ids_from_source = source_ids
-            except:
-                pass
-
+            # Targeted sync — only check IDs that belong to this source
             for id_val, index in id_to_index.items():
-                if id_val in source_ids:
-                    # This ID exists in source — check for updates
-                    source_row  = all_source_rows[id_val]
-                    master_row  = master_data[index]
-                    max_len     = max(len(source_row), len(master_row))
-                    source_norm = source_row + [""] * (max_len - len(source_row))
-                    master_norm = master_row + [""] * (max_len - len(master_row))
-                    if source_norm != master_norm:
-                        updates.append((index, source_row))
+                if id_to_source.get(id_val) == spreadsheet_id:
+                    if id_val not in all_source_rows:
+                        # Was in this source before, now gone = deleted
+                        ids_to_remove.append(index)
+                        id_to_source.pop(id_val, None)
+                    else:
+                        # Still exists — check for updates
+                        source_row  = all_source_rows[id_val]
+                        master_row  = master_data[index]
+                        max_len     = max(len(source_row), len(master_row))
+                        source_norm = source_row + [""] * (max_len - len(source_row))
+                        master_norm = master_row + [""] * (max_len - len(master_row))
+                        if source_norm != master_norm:
+                            updates.append((index, source_row))
         else:
-            # Full sync — check all IDs for removal
+            # Full sync — check all IDs
             for id_val, index in id_to_index.items():
                 if id_val not in all_source_rows:
                     ids_to_remove.append(index)
+                    id_to_source.pop(id_val, None)
                 else:
                     source_row  = all_source_rows[id_val]
                     master_row  = master_data[index]
@@ -158,6 +184,7 @@ def sync():
             )
             for sheet_row in rows_to_delete:
                 master_sheet_obj.delete_rows(sheet_row)
+                logging.info(f"Deleted row {sheet_row}")
 
             # Re-read master after deletions
             _, master_data = fetch_master(client)
@@ -196,23 +223,9 @@ def sync():
         logging.error(f"Sync error: {e}")
         return jsonify({"status": "error", "message": str(e)}), 500
 
-
-def get_all_sources():
-    # Full list of all 600 sources for fallback full sync
-    return [
-        {"id": "1PaYgXe2fzKkR-y-CXnei0RM2fQbCUlpVKoFAShjpX7w", "sheet": "Sheet1"},
-        {"id": "1bIsyZ2cF-uAFI3fa7G8xGL98ZK8o5Ra5WWbV0FRLD88", "sheet": "Sheet1"},
-        # add all 600 sources here
-    ]
-# Process in batches of 50
-def chunk_sources(sources, size=50):
-    for i in range(0, len(sources), size):
-        yield sources[i:i + size]
-
 @app.route("/", methods=["GET"])
 def health():
     return "OK", 200
-
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
