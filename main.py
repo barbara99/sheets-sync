@@ -204,7 +204,10 @@ def get_all_sources():
         {"id": "1bIsyZ2cF-uAFI3fa7G8xGL98ZK8o5Ra5WWbV0FRLD88", "sheet": "Sheet1"},
         # add all 600 sources here
     ]
-
+# Process in batches of 50
+def chunk_sources(sources, size=50):
+    for i in range(0, len(sources), size):
+        yield sources[i:i + size]
 
 @app.route("/", methods=["GET"])
 def health():
