@@ -10,7 +10,7 @@ app = Flask(__name__)
 
 logging.basicConfig(level=logging.INFO)
 
-START_ROW    = 23
+START_ROW    = 8
 ID_COL       = 0
 MASTER_SS_ID = "1BkMncGrq2o26CF77x7ppuyM0xlOEJSA6xNeu7T5CIHQ"
 MASTER_SHEET = "Sheet7"
