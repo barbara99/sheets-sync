@@ -64,7 +64,7 @@ def chunk_sources(sources, size=50):
 
 def get_all_sources():
     return [
-        {"id": "1pmtDOflpJ4ctaVLgp6BZs4zjv0Lhfvzt", "sheet": "GHIMS Incident Tracker"},
+        {"id": "/d/1pmtDOflpJ4ctaVLgp6BZs4zjv0Lhfvzt", "sheet": "GHIMS Incident Tracker"},
         # {"id": "1bIsyZ2cF-uAFI3fa7G8xGL98ZK8o5Ra5WWbV0FRLD88", "sheet": "Sheet1"},
         # add all 600 sources here
     ]
