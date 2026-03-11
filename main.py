@@ -226,6 +226,15 @@ def sync():
 @app.route("/", methods=["GET"])
 def health():
     return "OK", 200
+@app.route("/diagnose", methods=["GET"])
+def diagnose():
+    client = get_client()
+    data   = fetch_sheet(client, "1pmtDOflpJ4ctaVLgp6BZs4zjv0Lhfvzt", "GHIMS Incident Tracker", 1)
+    return jsonify({
+        "total_rows": len(data),
+        "first_row": data[0] if data else "EMPTY",
+        "second_row": data[1] if len(data) > 1 else "EMPTY"
+    })
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
