@@ -248,7 +248,6 @@ def diagnose():
     except Exception as e:
         return jsonify({"error": str(e)})
 
-https://sheets-sync-production.up.railway.app/diagnose
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
