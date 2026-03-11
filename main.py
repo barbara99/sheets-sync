@@ -229,12 +229,26 @@ def health():
 @app.route("/diagnose", methods=["GET"])
 def diagnose():
     client = get_client()
-    data   = fetch_sheet(client, "1pmtDOflpJ4ctaVLgp6BZs4zjv0Lhfvzt", "GHIMS Incident Tracker", 1)
-    return jsonify({
-        "total_rows": len(data),
-        "first_row": data[0] if data else "EMPTY",
-        "second_row": data[1] if len(data) > 1 else "EMPTY"
-    })
+    try:
+        ss     = client.open_by_key("1pmtDOflpJ4ctaVLgp6BZs4zjv0Lhfvzt")
+        sheets = ss.worksheets()
+        sheet_names = [s.title for s in sheets]
+        
+        # Try to read first sheet regardless of name
+        first_sheet = sheets[0]
+        all_rows    = first_sheet.get_all_values()
+        
+        return jsonify({
+            "all_tabs": sheet_names,
+            "first_tab_name": first_sheet.title,
+            "total_rows_in_first_tab": len(all_rows),
+            "row_13": all_rows[12] if len(all_rows) >= 13 else "EMPTY",
+            "row_1": all_rows[0] if all_rows else "EMPTY"
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)})
+
+https://sheets-sync-production.up.railway.app/diagnose
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
