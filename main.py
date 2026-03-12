@@ -6,6 +6,7 @@ import os
 import time
 from flask import Flask, request, jsonify
 import googleapiclient.discovery
+import io
 
 app = Flask(__name__)
 
@@ -15,6 +16,7 @@ START_ROW    = 13
 ID_COL       = 0
 MASTER_SS_ID = "1BkMncGrq2o26CF77x7ppuyM0xlOEJSA6xNeu7T5CIHQ"
 MASTER_SHEET = "Sheet7"
+BUFFER_FILE  = "/tmp/sync_buffer.json"
 
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
@@ -35,6 +37,7 @@ def get_drive_service():
     return googleapiclient.discovery.build("drive", "v3", credentials=creds)
 
 def fetch_sheet(client, spreadsheet_id, sheet_name, start_row):
+    """Fetch data from a native Google Sheet."""
     for attempt in range(3):
         try:
             ss       = client.open_by_key(spreadsheet_id)
@@ -52,7 +55,43 @@ def fetch_sheet(client, spreadsheet_id, sheet_name, start_row):
                 return []
     return []
 
+def fetch_excel_source(file_id, sheet_name):
+    """Download Excel file from Drive and read directly into memory as rows."""
+    try:
+        import openpyxl
+
+        drive_service = get_drive_service()
+
+        # Download the Excel file as bytes
+        request_obj = drive_service.files().get_media(fileId=file_id)
+        file_bytes  = io.BytesIO(request_obj.execute())
+
+        # Load with openpyxl
+        workbook  = openpyxl.load_workbook(file_bytes, data_only=True)
+
+        # Find the sheet
+        if sheet_name in workbook.sheetnames:
+            ws = workbook[sheet_name]
+        else:
+            logging.warning(f"Sheet '{sheet_name}' not found. Available: {workbook.sheetnames}")
+            ws = workbook.active
+
+        # Convert to list of rows starting from START_ROW
+        all_rows = []
+        for row in ws.iter_rows(min_row=START_ROW, values_only=True):
+            row_as_strings = [str(cell) if cell is not None else "" for cell in row]
+            if any(cell.strip() for cell in row_as_strings):
+                all_rows.append(row_as_strings)
+
+        logging.info(f"Read {len(all_rows)} rows from Excel file {file_id}")
+        return all_rows
+
+    except Exception as e:
+        logging.error(f"Failed to read Excel file {file_id}: {e}")
+        return []
+
 def fetch_master(client):
+    """Fetch master sheet data."""
     try:
         ss       = client.open_by_key(MASTER_SS_ID)
         sheet    = ss.worksheet(MASTER_SHEET)
@@ -64,43 +103,49 @@ def fetch_master(client):
         logging.error(f"Failed to fetch master: {e}")
         return None, []
 
-def sync_excel_source(client, excel_file_id, sheet_name):
-    """Convert Excel file to temp Google Sheet, read data, delete temp sheet."""
-    temp_id = None
+def save_to_buffer(data, source_id):
+    """Save source data to JSON buffer."""
     try:
-        drive_service = get_drive_service()
+        buffer = {}
+        if os.path.exists(BUFFER_FILE):
+            with open(BUFFER_FILE, "r") as f:
+                buffer = json.load(f)
 
-        # Copy and convert Excel to Google Sheets format
-        copied_file = drive_service.files().copy(
-            fileId=excel_file_id,
-            body={
-                "name": "TEMP_SYNC_COPY",
-                "mimeType": "application/vnd.google-apps.spreadsheet"
-            }
-        ).execute()
+        buffer[source_id] = {
+            "rows":      data,
+            "timestamp": time.time(),
+            "count":     len(data)
+        }
 
-        temp_id = copied_file["id"]
-        logging.info(f"Created temp Google Sheet: {temp_id}")
+        with open(BUFFER_FILE, "w") as f:
+            json.dump(buffer, f)
 
-        # Read data from temp sheet
-        data = fetch_sheet(client, temp_id, sheet_name, START_ROW)
-        logging.info(f"Read {len(data)} rows from temp sheet")
-
-        return data
+        logging.info(f"Saved {len(data)} rows to buffer for {source_id}")
+        return True
 
     except Exception as e:
-        logging.error(f"Failed to sync Excel source {excel_file_id}: {e}")
-        return []
+        logging.error(f"Failed to save to buffer: {e}")
+        return False
 
-    finally:
-        # Always delete temp sheet even if something fails
-        if temp_id:
-            try:
-                drive_service = get_drive_service()
-                drive_service.files().delete(fileId=temp_id).execute()
-                logging.info(f"Deleted temp sheet: {temp_id}")
-            except Exception as e:
-                logging.warning(f"Failed to delete temp sheet {temp_id}: {e}")
+def load_from_buffer():
+    """Load all buffered data."""
+    try:
+        if not os.path.exists(BUFFER_FILE):
+            return {}
+        with open(BUFFER_FILE, "r") as f:
+            return json.load(f)
+    except Exception as e:
+        logging.error(f"Failed to load buffer: {e}")
+        return {}
+
+def clear_buffer():
+    """Clear buffer after successful sync."""
+    try:
+        if os.path.exists(BUFFER_FILE):
+            os.remove(BUFFER_FILE)
+            logging.info("Buffer cleared")
+    except Exception as e:
+        logging.warning(f"Failed to clear buffer: {e}")
 
 def chunk_sources(sources, size=50):
     for i in range(0, len(sources), size):
@@ -109,8 +154,8 @@ def chunk_sources(sources, size=50):
 def get_all_sources():
     return [
         {"id": "1pmtDOflpJ4ctaVLgp6BZs4zjv0Lhfvzt", "sheet": "GHIMS Incident Tracker", "type": "excel"},
-        # {"id": "1bIsyZ2cF-uAFI3fa7G8xGL98ZK8o5Ra5WWbV0FRLD88", "sheet": "Sheet1", "type": "gsheet"},
-        # add all 600 sources here, specify type as "excel" or "gsheet"
+        # {"id": "SPREADSHEET_ID", "sheet": "Sheet1", "type": "gsheet"},
+        # add all sources here
     ]
 
 @app.route("/sync", methods=["POST"])
@@ -138,14 +183,12 @@ def sync():
 
         logging.info(f"Master has {len(id_to_index)} existing IDs")
 
-        # Fetch sources
+        # ── STEP 1: Fetch sources → save to JSON buffer ───────────────────
         all_source_rows = {}
 
         if spreadsheet_id and sheet_name:
-            # Targeted sync — only fetch the one sheet that changed
             logging.info(f"Targeted sync for {spreadsheet_id}/{sheet_name}")
 
-            # Check if this source is excel or gsheet
             source_type = "gsheet"
             for s in get_all_sources():
                 if s["id"] == spreadsheet_id:
@@ -153,19 +196,20 @@ def sync():
                     break
 
             if source_type == "excel":
-                source_data = sync_excel_source(client, spreadsheet_id, sheet_name)
+                source_data = fetch_excel_source(spreadsheet_id, sheet_name)
             else:
                 source_data = fetch_sheet(client, spreadsheet_id, sheet_name, START_ROW)
+
+            save_to_buffer(source_data, spreadsheet_id)
 
             for row in source_data:
                 id_val = row[ID_COL].strip() if len(row) > ID_COL else ""
                 if not id_val:
                     continue
                 all_source_rows[id_val] = row
-                id_to_source[id_val] = spreadsheet_id
+                id_to_source[id_val]    = spreadsheet_id
 
         else:
-            # Full sync — process all sources in batches of 50
             logging.info("Full sync — fetching all sources in batches...")
             sources   = get_all_sources()
             completed = 0
@@ -173,33 +217,42 @@ def sync():
             for batch in chunk_sources(sources, size=50):
                 for source in batch:
                     if source.get("type") == "excel":
-                        source_data = sync_excel_source(client, source["id"], source["sheet"])
+                        source_data = fetch_excel_source(source["id"], source["sheet"])
                     else:
                         source_data = fetch_sheet(client, source["id"], source["sheet"], START_ROW)
+
+                    save_to_buffer(source_data, source["id"])
 
                     for row in source_data:
                         id_val = row[ID_COL].strip() if len(row) > ID_COL else ""
                         if not id_val:
                             continue
                         all_source_rows[id_val] = row
-                        id_to_source[id_val] = source["id"]
+                        id_to_source[id_val]    = source["id"]
 
                     completed += 1
                     logging.info(f"Fetched {completed}/{len(sources)} sources")
 
-                # Pause between batches to avoid rate limits
                 if completed < len(sources):
                     logging.info("Batch done, pausing 15 seconds...")
                     time.sleep(15)
 
-        logging.info(f"Source rows fetched: {len(all_source_rows)}")
+        logging.info(f"Buffer saved. Total source rows: {len(all_source_rows)}")
 
+        # ── STEP 2: Load from buffer and validate ─────────────────────────
+        buffer           = load_from_buffer()
+        buffer_row_count = sum(v["count"] for v in buffer.values())
+        logging.info(f"Buffer contains {len(buffer)} sources, {buffer_row_count} total rows")
+
+        if buffer_row_count == 0:
+            return jsonify({"status": "ok", "message": "Nothing to sync", "new": 0, "updates": 0, "removed": 0}), 200
+
+        # ── STEP 3: Compare and write to master ───────────────────────────
         new_rows      = []
         updates       = []
         ids_to_remove = []
 
         if spreadsheet_id and sheet_name:
-            # Targeted sync — only check IDs that belong to this source
             for id_val, index in id_to_index.items():
                 if id_to_source.get(id_val) == spreadsheet_id:
                     if id_val not in all_source_rows:
@@ -214,7 +267,6 @@ def sync():
                         if source_norm != master_norm:
                             updates.append((index, source_row))
         else:
-            # Full sync — check all IDs
             for id_val, index in id_to_index.items():
                 if id_val not in all_source_rows:
                     ids_to_remove.append(index)
@@ -228,7 +280,6 @@ def sync():
                     if source_norm != master_norm:
                         updates.append((index, source_row))
 
-        # Find new IDs
         for id_val, row in all_source_rows.items():
             if id_val not in id_to_index:
                 new_rows.append(row)
@@ -245,9 +296,8 @@ def sync():
                 master_sheet_obj.delete_rows(sheet_row)
                 logging.info(f"Deleted row {sheet_row}")
 
-            # Re-read master after deletions
             _, master_data = fetch_master(client)
-            id_to_index = {}
+            id_to_index    = {}
             for i, row in enumerate(master_data):
                 id_val = row[ID_COL].strip() if len(row) > ID_COL else ""
                 if id_val:
@@ -271,33 +321,45 @@ def sync():
             new_rows = [row + [""] * (max_cols - len(row)) for row in new_rows]
             master_sheet_obj.append_rows(new_rows, value_input_option="RAW")
 
+        # ── STEP 4: Clear buffer after successful sync ────────────────────
+        clear_buffer()
+        logging.info("Sync complete. Buffer cleared.")
+
         return jsonify({
-            "status": "ok",
-            "new": len(new_rows),
-            "updates": len(updates),
-            "removed": len(ids_to_remove)
+            "status":                   "ok",
+            "new":                      len(new_rows),
+            "updates":                  len(updates),
+            "removed":                  len(ids_to_remove),
+            "buffer_sources_processed": len(buffer)
         }), 200
 
     except Exception as e:
         logging.error(f"Sync error: {e}")
         return jsonify({"status": "error", "message": str(e)}), 500
 
+@app.route("/buffer", methods=["GET"])
+def view_buffer():
+    buffer  = load_from_buffer()
+    summary = {}
+    for source_id, val in buffer.items():
+        summary[source_id] = {
+            "rows":      val["count"],
+            "timestamp": val["timestamp"]
+        }
+    return jsonify({
+        "total_sources": len(buffer),
+        "total_rows":    sum(v["count"] for v in buffer.values()),
+        "sources":       summary
+    })
+
 @app.route("/diagnose", methods=["GET"])
 def diagnose():
-    client = get_client()
     try:
-        ss          = client.open_by_key("1pmtDOflpJ4ctaVLgp6BZs4zjv0Lhfvzt")
-        sheets      = ss.worksheets()
-        sheet_names = [s.title for s in sheets]
-        first_sheet = sheets[0]
-        all_rows    = first_sheet.get_all_values()
-
+        rows = fetch_excel_source("1pmtDOflpJ4ctaVLgp6BZs4zjv0Lhfvzt", "GHIMS Incident Tracker")
         return jsonify({
-            "all_tabs":                sheet_names,
-            "first_tab_name":          first_sheet.title,
-            "total_rows_in_first_tab": len(all_rows),
-            "row_13":                  all_rows[12] if len(all_rows) >= 13 else "EMPTY",
-            "row_1":                   all_rows[0]  if all_rows else "EMPTY"
+            "total_rows": len(rows),
+            "first_row":  rows[0] if rows else "EMPTY",
+            "second_row": rows[1] if len(rows) > 1 else "EMPTY"
         })
     except Exception as e:
         return jsonify({"error": str(e)})
