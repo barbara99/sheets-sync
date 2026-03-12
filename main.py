@@ -240,11 +240,11 @@ def get_all_sources():
 
         # ── To add more sources, just paste the link: ──────────────────────
         # Google Sheets link
-        # {
-        #     "url":       "https://docs.google.com/spreadsheets/d/SHEET_ID/edit",
-        #     "sheet":     "Sheet1",
-        #     "start_row": 13
-        # },
+        {
+            "url":       "https://docs.google.com/spreadsheets/d/1nAvvgPk0iMysrAx4TX30btTB-eUOcdAT/edit?gid=1467006846#gid=1467006846",
+            "sheet":     "GHIMS Incident Tracker",
+            "start_row": 13
+        },
         # Google Drive Excel/CSV link
         # {
         #     "url":       "https://drive.google.com/file/d/FILE_ID/view",
