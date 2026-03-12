@@ -216,10 +216,10 @@ def get_all_sources():
             "start_row": 13
         },
         # Any URL — type auto-detected
-        # {
-        "url":       "https://docs.google.com/spreadsheets/d/1nAvvgPk0iMysrAx4TX30btTB-eUOcdAT/edit?gid=1467006846#gid=1467006846",
-            "sheet":     "GHIMS Incident Tracker",   # optional
-            "start_row": 13
+         {
+             "url":     "https://docs.google.com/spreadsheets/d/1nAvvgPk0iMysrAx4TX30btTB-eUOcdAT/edit?gid=1467006846#gid=1467006846",
+             "sheet":  "GHIMS Incident Tracker",   # optional
+             "start_row": 13
         },
         # Native Google Sheet
         # {
