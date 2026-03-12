@@ -4,15 +4,14 @@ import logging
 import json
 import os
 import time
+import io
 from flask import Flask, request, jsonify
 import googleapiclient.discovery
-import io
 
 app = Flask(__name__)
 
 logging.basicConfig(level=logging.INFO)
 
-START_ROW    = 13
 ID_COL       = 0
 MASTER_SS_ID = "1BkMncGrq2o26CF77x7ppuyM0xlOEJSA6xNeu7T5CIHQ"
 MASTER_SHEET = "Sheet7"
@@ -23,7 +22,6 @@ SCOPES = [
     "https://www.googleapis.com/auth/drive"
 ]
 
-# In-memory map: ID → source spreadsheet ID
 id_to_source = {}
 
 def get_client():
@@ -37,7 +35,6 @@ def get_drive_service():
     return googleapiclient.discovery.build("drive", "v3", credentials=creds)
 
 def fetch_sheet(client, spreadsheet_id, sheet_name, start_row):
-    """Fetch data from a native Google Sheet."""
     for attempt in range(3):
         try:
             ss       = client.open_by_key(spreadsheet_id)
@@ -55,32 +52,36 @@ def fetch_sheet(client, spreadsheet_id, sheet_name, start_row):
                 return []
     return []
 
-def fetch_excel_source(file_id, sheet_name):
-    """Download Excel file from Drive and read directly into memory as rows."""
+def fetch_excel_source(file_id, sheet_name, start_row):
     try:
         import openpyxl
 
         drive_service = get_drive_service()
+        request_obj   = drive_service.files().get_media(fileId=file_id)
+        file_bytes    = io.BytesIO(request_obj.execute())
 
-        # Download the Excel file as bytes
-        request_obj = drive_service.files().get_media(fileId=file_id)
-        file_bytes  = io.BytesIO(request_obj.execute())
+        workbook = openpyxl.load_workbook(file_bytes, data_only=True)
 
-        # Load with openpyxl
-        workbook  = openpyxl.load_workbook(file_bytes, data_only=True)
-
-        # Find the sheet
         if sheet_name in workbook.sheetnames:
             ws = workbook[sheet_name]
         else:
             logging.warning(f"Sheet '{sheet_name}' not found. Available: {workbook.sheetnames}")
             ws = workbook.active
 
-        # Convert to list of rows starting from START_ROW
         all_rows = []
-        for row in ws.iter_rows(min_row=START_ROW, values_only=True):
+        for row in ws.iter_rows(min_row=start_row, values_only=True):
             row_as_strings = [str(cell) if cell is not None else "" for cell in row]
-            if any(cell.strip() for cell in row_as_strings):
+
+            if not any(cell.strip() for cell in row_as_strings):
+                continue
+
+            while row_as_strings and row_as_strings[0] == "":
+                row_as_strings.pop(0)
+
+            while row_as_strings and row_as_strings[-1] == "":
+                row_as_strings.pop()
+
+            if row_as_strings:
                 all_rows.append(row_as_strings)
 
         logging.info(f"Read {len(all_rows)} rows from Excel file {file_id}")
@@ -91,20 +92,33 @@ def fetch_excel_source(file_id, sheet_name):
         return []
 
 def fetch_master(client):
-    """Fetch master sheet data."""
     try:
         ss       = client.open_by_key(MASTER_SS_ID)
         sheet    = ss.worksheet(MASTER_SHEET)
         all_rows = sheet.get_all_values()
-        data     = all_rows[START_ROW - 1:]
-        data     = [row for row in data if any(cell.strip() for cell in row)]
+        data     = [row for row in all_rows if any(cell.strip() for cell in row)]
         return sheet, data
     except Exception as e:
         logging.error(f"Failed to fetch master: {e}")
         return None, []
 
+def get_master_row_map(client):
+    """Get accurate 1-indexed row positions from master sheet."""
+    try:
+        ss       = client.open_by_key(MASTER_SS_ID)
+        sheet    = ss.worksheet(MASTER_SHEET)
+        all_rows = sheet.get_all_values()
+        row_map  = {}
+        for i, row in enumerate(all_rows):
+            id_val = row[ID_COL].strip() if len(row) > ID_COL else ""
+            if id_val:
+                row_map[id_val] = i + 1  # 1-indexed
+        return sheet, row_map
+    except Exception as e:
+        logging.error(f"Failed to get master row map: {e}")
+        return None, {}
+
 def save_to_buffer(data, source_id):
-    """Save source data to JSON buffer."""
     try:
         buffer = {}
         if os.path.exists(BUFFER_FILE):
@@ -128,7 +142,6 @@ def save_to_buffer(data, source_id):
         return False
 
 def load_from_buffer():
-    """Load all buffered data."""
     try:
         if not os.path.exists(BUFFER_FILE):
             return {}
@@ -139,7 +152,6 @@ def load_from_buffer():
         return {}
 
 def clear_buffer():
-    """Clear buffer after successful sync."""
     try:
         if os.path.exists(BUFFER_FILE):
             os.remove(BUFFER_FILE)
@@ -151,11 +163,28 @@ def chunk_sources(sources, size=50):
     for i in range(0, len(sources), size):
         yield sources[i:i + size]
 
+def get_source_data(client, source):
+    start_row = source.get("start_row", 13)
+    if source.get("type") == "excel":
+        return fetch_excel_source(source["id"], source["sheet"], start_row)
+    else:
+        return fetch_sheet(client, source["id"], source["sheet"], start_row)
+
 def get_all_sources():
     return [
-        {"id": "1pmtDOflpJ4ctaVLgp6BZs4zjv0Lhfvzt", "sheet": "GHIMS Incident Tracker", "type": "excel"},
-        # {"id": "SPREADSHEET_ID", "sheet": "Sheet1", "type": "gsheet"},
-        # add all sources here
+        {
+            "id":        "1pmtDOflpJ4ctaVLgp6BZs4zjv0Lhfvzt",
+            "sheet":     "GHIMS Incident Tracker",
+            "type":      "excel",
+            "start_row": 13
+        },
+        # add more sources here:
+        # {
+        #     "id":        "SPREADSHEET_ID",
+        #     "sheet":     "Sheet1",
+        #     "type":      "gsheet",  # or "excel"
+        #     "start_row": 5
+        # },
     ]
 
 @app.route("/sync", methods=["POST"])
@@ -174,7 +203,7 @@ def sync():
         if master_sheet_obj is None:
             return jsonify({"status": "error", "message": "Could not read master sheet"}), 500
 
-        # Build master ID map
+        # Build master ID map (0-indexed into master_data)
         id_to_index = {}
         for i, row in enumerate(master_data):
             id_val = row[ID_COL].strip() if len(row) > ID_COL else ""
@@ -182,6 +211,7 @@ def sync():
                 id_to_index[id_val] = i
 
         logging.info(f"Master has {len(id_to_index)} existing IDs")
+        logging.info(f"Master ID sample: {list(id_to_index.keys())[:5]}")
 
         # ── STEP 1: Fetch sources → save to JSON buffer ───────────────────
         all_source_rows = {}
@@ -189,16 +219,14 @@ def sync():
         if spreadsheet_id and sheet_name:
             logging.info(f"Targeted sync for {spreadsheet_id}/{sheet_name}")
 
-            source_type = "gsheet"
+            matched_source = None
             for s in get_all_sources():
                 if s["id"] == spreadsheet_id:
-                    source_type = s.get("type", "gsheet")
+                    matched_source = s
                     break
 
-            if source_type == "excel":
-                source_data = fetch_excel_source(spreadsheet_id, sheet_name)
-            else:
-                source_data = fetch_sheet(client, spreadsheet_id, sheet_name, START_ROW)
+            source_data = get_source_data(client, matched_source) if matched_source else \
+                          fetch_sheet(client, spreadsheet_id, sheet_name, 13)
 
             save_to_buffer(source_data, spreadsheet_id)
 
@@ -216,11 +244,7 @@ def sync():
 
             for batch in chunk_sources(sources, size=50):
                 for source in batch:
-                    if source.get("type") == "excel":
-                        source_data = fetch_excel_source(source["id"], source["sheet"])
-                    else:
-                        source_data = fetch_sheet(client, source["id"], source["sheet"], START_ROW)
-
+                    source_data = get_source_data(client, source)
                     save_to_buffer(source_data, source["id"])
 
                     for row in source_data:
@@ -237,17 +261,18 @@ def sync():
                     logging.info("Batch done, pausing 15 seconds...")
                     time.sleep(15)
 
-        logging.info(f"Buffer saved. Total source rows: {len(all_source_rows)}")
+        logging.info(f"Source rows fetched: {len(all_source_rows)}")
+        logging.info(f"Source ID sample: {list(all_source_rows.keys())[:5]}")
 
-        # ── STEP 2: Load from buffer and validate ─────────────────────────
+        # ── STEP 2: Load and validate buffer ─────────────────────────────
         buffer           = load_from_buffer()
         buffer_row_count = sum(v["count"] for v in buffer.values())
-        logging.info(f"Buffer contains {len(buffer)} sources, {buffer_row_count} total rows")
+        logging.info(f"Buffer: {len(buffer)} sources, {buffer_row_count} total rows")
 
         if buffer_row_count == 0:
             return jsonify({"status": "ok", "message": "Nothing to sync", "new": 0, "updates": 0, "removed": 0}), 200
 
-        # ── STEP 3: Compare and write to master ───────────────────────────
+        # ── STEP 3: Compare ───────────────────────────────────────────────
         new_rows      = []
         updates       = []
         ids_to_remove = []
@@ -256,7 +281,7 @@ def sync():
             for id_val, index in id_to_index.items():
                 if id_to_source.get(id_val) == spreadsheet_id:
                     if id_val not in all_source_rows:
-                        ids_to_remove.append(index)
+                        ids_to_remove.append(id_val)
                         id_to_source.pop(id_val, None)
                     else:
                         source_row  = all_source_rows[id_val]
@@ -265,11 +290,11 @@ def sync():
                         source_norm = source_row + [""] * (max_len - len(source_row))
                         master_norm = master_row + [""] * (max_len - len(master_row))
                         if source_norm != master_norm:
-                            updates.append((index, source_row))
+                            updates.append((id_val, source_row))
         else:
             for id_val, index in id_to_index.items():
                 if id_val not in all_source_rows:
-                    ids_to_remove.append(index)
+                    ids_to_remove.append(id_val)
                     id_to_source.pop(id_val, None)
                 else:
                     source_row  = all_source_rows[id_val]
@@ -278,7 +303,7 @@ def sync():
                     source_norm = source_row + [""] * (max_len - len(source_row))
                     master_norm = master_row + [""] * (max_len - len(master_row))
                     if source_norm != master_norm:
-                        updates.append((index, source_row))
+                        updates.append((id_val, source_row))
 
         for id_val, row in all_source_rows.items():
             if id_val not in id_to_index:
@@ -286,42 +311,44 @@ def sync():
 
         logging.info(f"New: {len(new_rows)} | Updates: {len(updates)} | Removals: {len(ids_to_remove)}")
 
-        # Apply removals
+        # Get accurate row positions for writes
+        _, row_map = get_master_row_map(client)
+
+        # Apply removals (bottom up to preserve row numbers)
         if ids_to_remove:
             rows_to_delete = sorted(
-                [START_ROW + i for i in ids_to_remove],
+                [row_map[id_val] for id_val in ids_to_remove if id_val in row_map],
                 reverse=True
             )
             for sheet_row in rows_to_delete:
                 master_sheet_obj.delete_rows(sheet_row)
                 logging.info(f"Deleted row {sheet_row}")
 
-            _, master_data = fetch_master(client)
-            id_to_index    = {}
-            for i, row in enumerate(master_data):
-                id_val = row[ID_COL].strip() if len(row) > ID_COL else ""
-                if id_val:
-                    id_to_index[id_val] = i
+            # Refresh row map after deletions
+            _, row_map = get_master_row_map(client)
 
-        # Apply updates
+        # Apply updates using accurate row positions
         if updates:
             max_cols = max(len(row) for _, row in updates)
-            for index, row in updates:
-                normalized = row + [""] * (max_cols - len(row))
-                sheet_row  = START_ROW + index
-                master_sheet_obj.update(
-                    f"A{sheet_row}",
-                    [normalized],
-                    value_input_option="RAW"
-                )
+            for id_val, row in updates:
+                sheet_row = row_map.get(id_val)
+                if sheet_row:
+                    normalized = row + [""] * (max_cols - len(row))
+                    master_sheet_obj.update(
+                        f"A{sheet_row}",
+                        [normalized],
+                        value_input_option="RAW"
+                    )
+                    logging.info(f"Updated row {sheet_row} for ID {id_val}")
 
         # Append new rows
         if new_rows:
             max_cols = max(len(row) for row in new_rows)
             new_rows = [row + [""] * (max_cols - len(row)) for row in new_rows]
             master_sheet_obj.append_rows(new_rows, value_input_option="RAW")
+            logging.info(f"Appended {len(new_rows)} new rows")
 
-        # ── STEP 4: Clear buffer after successful sync ────────────────────
+        # ── STEP 4: Clear buffer ──────────────────────────────────────────
         clear_buffer()
         logging.info("Sync complete. Buffer cleared.")
 
@@ -355,7 +382,9 @@ def view_buffer():
 @app.route("/diagnose", methods=["GET"])
 def diagnose():
     try:
-        rows = fetch_excel_source("1pmtDOflpJ4ctaVLgp6BZs4zjv0Lhfvzt", "GHIMS Incident Tracker")
+        client  = get_client()
+        source  = get_all_sources()[0]
+        rows    = get_source_data(client, source)
         return jsonify({
             "total_rows": len(rows),
             "first_row":  rows[0] if rows else "EMPTY",
