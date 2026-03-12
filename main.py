@@ -396,6 +396,48 @@ def diagnose():
 @app.route("/", methods=["GET"])
 def health():
     return "OK", 200
+    
+@app.route("/dedupe", methods=["POST"])
+def dedupe():
+    try:
+        client = get_client()
+
+        # Read full master sheet including row positions
+        ss       = client.open_by_key(MASTER_SS_ID)
+        sheet    = ss.worksheet(MASTER_SHEET)
+        all_rows = sheet.get_all_values()
+
+        seen_ids      = {}
+        rows_to_delete = []
+
+        for i, row in enumerate(all_rows):
+            id_val = row[ID_COL].strip() if len(row) > ID_COL else ""
+            if not id_val:
+                continue
+
+            if id_val in seen_ids:
+                # Duplicate — mark for deletion
+                rows_to_delete.append(i + 1)  # 1-indexed sheet row
+                logging.info(f"Duplicate found: {id_val} at row {i + 1}")
+            else:
+                seen_ids[id_val] = i + 1  # keep first occurrence
+
+        logging.info(f"Found {len(rows_to_delete)} duplicate rows to delete")
+
+        # Delete from bottom up to preserve row numbers
+        for sheet_row in sorted(rows_to_delete, reverse=True):
+            sheet.delete_rows(sheet_row)
+            logging.info(f"Deleted duplicate at row {sheet_row}")
+
+        return jsonify({
+            "status":            "ok",
+            "duplicates_removed": len(rows_to_delete),
+            "unique_ids_kept":   len(seen_ids)
+        }), 200
+
+    except Exception as e:
+        logging.error(f"Dedupe error: {e}")
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
