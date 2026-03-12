@@ -232,7 +232,7 @@ def get_all_sources():
     return [
         # Google Drive Excel file
         {
-            "id":        "1pmtDOflpJ4ctaVLgp6BZs4zjv0Lhfvzt",
+            "id":        "1pmtDOflpJ4ctaVLgp6BZs4zjv0Lhfvzt", # Tema General Hospital
             "sheet":     "GHIMS Incident Tracker",
             "type":      "excel",
             "start_row": 13
@@ -241,7 +241,7 @@ def get_all_sources():
         # ── To add more sources, just paste the link ───────────────────────
         # Google Sheets link
         {
-            "id":       "1nAvvgPk0iMysrAx4TX30btTB-eUOcdAT",
+            "id":       "1nAvvgPk0iMysrAx4TX30btTB-eUOcdAT", # Adabraka Polyclinic
             "sheet":     "GHIMS Incident Tracker",
             "type":      "excel",
             "start_row": 13
