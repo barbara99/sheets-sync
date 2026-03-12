@@ -4,3 +4,4 @@ google-auth
 gunicorn
 google-api-python-client
 openpyxl
+requests
