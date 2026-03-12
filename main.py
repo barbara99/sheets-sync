@@ -1,3 +1,24 @@
+
+def get_all_sources():
+    return [
+        # Google Drive Excel file
+        {
+            "id":        "1pmtDOflpJ4ctaVLgp6BZs4zjv0Lhfvzt",
+            "sheet":     "GHIMS Incident Tracker",
+            "type":      "excel",
+            "start_row": 13
+        },
+
+        # ── To add more sources, just paste the link: ──────────────────────
+        # Google Sheets link
+        {
+            "id":       "1nAvvgPk0iMysrAx4TX30btTB-eUOcdAT",
+            "sheet":     "GHIMS Incident Tracker",
+            "type":      "excel",
+            "start_row": 13
+        },
+     
+# ── Buffer ───────────────────────────────────────────────────────────────────
 import gspread
 from google.oauth2.service_account import Credentials
 import logging
@@ -49,17 +70,16 @@ def parse_excel(file_bytes, sheet_name, start_row):
     else:
         ws = workbook.active
 
+    max_col  = ws.max_column
     all_rows = []
-    for row in ws.iter_rows(min_row=start_row, values_only=True):
+
+    for row in ws.iter_rows(min_row=start_row, max_col=max_col, values_only=True):
         row_as_strings = [str(cell) if cell is not None else "" for cell in row]
+        # Skip completely empty rows only — never strip or shift columns
         if not any(cell.strip() for cell in row_as_strings):
             continue
-        while row_as_strings and row_as_strings[0] == "":
-            row_as_strings.pop(0)
-        while row_as_strings and row_as_strings[-1] == "":
-            row_as_strings.pop()
-        if row_as_strings:
-            all_rows.append(row_as_strings)
+        all_rows.append(row_as_strings)
+
     return all_rows
 
 def parse_csv(content, start_row):
@@ -71,6 +91,7 @@ def parse_csv(content, start_row):
     reader   = csv.reader(text.splitlines())
     all_rows = list(reader)
     data     = all_rows[start_row - 1:]
+    # Skip completely empty rows only — never strip or shift columns
     data     = [row for row in data if any(cell.strip() for cell in row)]
     return data
 
@@ -83,6 +104,7 @@ def fetch_sheet(client, spreadsheet_id, sheet_name, start_row):
             sheet    = ss.worksheet(sheet_name)
             all_rows = sheet.get_all_values()
             data     = all_rows[start_row - 1:]
+            # Skip completely empty rows only — never strip or shift columns
             data     = [row for row in data if any(cell.strip() for cell in row)]
             return data
         except Exception as e:
@@ -109,7 +131,7 @@ def detect_and_fetch_url(url, sheet_name, start_row):
 
     # Google Sheets URL → use Sheets API
     if "docs.google.com/spreadsheets/d/" in url:
-        match = re.search(r"/spreadsheets/d/([a-zA-Z0-9_-]+)", url)
+        match = re.search(r"spreadsheets/d/([a-zA-Z0-9_-]+)", url)
         if match:
             spreadsheet_id = match.group(1)
             logging.info(f"Google Sheets URL detected, using API: {spreadsheet_id}")
@@ -120,8 +142,8 @@ def detect_and_fetch_url(url, sheet_name, start_row):
             return []
 
     # Google Drive file URL → use Drive API
-    if "drive.google.com" in url:
-        match = re.search(r"/d/([a-zA-Z0-9_-]+)", url)
+    if "drive.google.com/file/d/" in url:
+        match = re.search(r"file/d/([a-zA-Z0-9_-]+)", url)
         if match:
             file_id = match.group(1)
             logging.info(f"Google Drive URL detected, using Drive API: {file_id}")
@@ -215,7 +237,6 @@ def get_source_data(client, source):
     start_row = source.get("start_row", 13)
 
     if "url" in source:
-        # Auto-detect from URL — handles Google Sheets, Drive, Excel, CSV, etc.
         return detect_and_fetch_url(
             source["url"],
             source.get("sheet"),
@@ -238,7 +259,7 @@ def get_all_sources():
             "start_row": 13
         },
 
-        # ── To add more sources, just paste the link: ──────────────────────
+        # ── To add more sources, just paste the link ───────────────────────
         # Google Sheets link
         {
             "id":       "1nAvvgPk0iMysrAx4TX30btTB-eUOcdAT",
@@ -314,7 +335,6 @@ def sync():
 
         client = get_client()
 
-        # Read master
         logging.info("Reading master sheet...")
         master_sheet_obj, id_to_row, id_to_data, last_row = fetch_master(client)
         if master_sheet_obj is None:
