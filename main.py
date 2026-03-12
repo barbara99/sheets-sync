@@ -1,24 +1,3 @@
-
-def get_all_sources():
-    return [
-        # Google Drive Excel file
-        {
-            "id":        "1pmtDOflpJ4ctaVLgp6BZs4zjv0Lhfvzt",
-            "sheet":     "GHIMS Incident Tracker",
-            "type":      "excel",
-            "start_row": 13
-        },
-
-        # ── To add more sources, just paste the link: ──────────────────────
-        # Google Sheets link
-        {
-            "id":       "1nAvvgPk0iMysrAx4TX30btTB-eUOcdAT",
-            "sheet":     "GHIMS Incident Tracker",
-            "type":      "excel",
-            "start_row": 13
-        },
-     
-# ── Buffer ───────────────────────────────────────────────────────────────────
 import gspread
 from google.oauth2.service_account import Credentials
 import logging
