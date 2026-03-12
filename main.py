@@ -5,6 +5,7 @@ import json
 import os
 import time
 import io
+import re
 from flask import Flask, request, jsonify
 import googleapiclient.discovery
 
@@ -104,6 +105,32 @@ def fetch_excel_source(file_id, sheet_name, start_row):
         return []
 
 def detect_and_fetch_url(url, sheet_name, start_row):
+    """Download file from any URL and auto-detect type."""
+
+    # Google Sheets URL → use Sheets API
+    if "docs.google.com/spreadsheets/d/" in url:
+        match = re.search(r"/spreadsheets/d/([a-zA-Z0-9_-]+)", url)
+        if match:
+            spreadsheet_id = match.group(1)
+            logging.info(f"Google Sheets URL detected, using API: {spreadsheet_id}")
+            client = get_client()
+            return fetch_sheet(client, spreadsheet_id, sheet_name or "Sheet1", start_row)
+        else:
+            logging.error(f"Could not extract ID from Google Sheets URL: {url}")
+            return []
+
+    # Google Drive file URL → use Drive API
+    if "drive.google.com" in url:
+        match = re.search(r"/d/([a-zA-Z0-9_-]+)", url)
+        if match:
+            file_id = match.group(1)
+            logging.info(f"Google Drive URL detected, using Drive API: {file_id}")
+            return fetch_excel_source(file_id, sheet_name, start_row)
+        else:
+            logging.error(f"Could not extract ID from Drive URL: {url}")
+            return []
+
+    # Everything else — download and auto-detect
     try:
         import requests
 
@@ -116,7 +143,6 @@ def detect_and_fetch_url(url, sheet_name, start_row):
 
         content_type = response.headers.get("Content-Type", "").lower()
         url_lower    = url.lower()
-
         logging.info(f"Content-Type: {content_type}")
 
         # Detect Excel
@@ -130,12 +156,7 @@ def detect_and_fetch_url(url, sheet_name, start_row):
             logging.info("Detected: CSV")
             return parse_csv(response.content, start_row)
 
-        # Detect Google Sheets
-        elif "docs.google.com/spreadsheets" in url_lower:
-            logging.info("Detected: Google Sheets export")
-            return parse_csv(response.content, start_row)
-
-        # Try Excel first then CSV
+        # Try Excel first, then CSV
         else:
             logging.info("Unknown type — trying Excel first, then CSV")
             try:
@@ -194,6 +215,7 @@ def get_source_data(client, source):
     start_row = source.get("start_row", 13)
 
     if "url" in source:
+        # Auto-detect from URL — handles Google Sheets, Drive, Excel, CSV, etc.
         return detect_and_fetch_url(
             source["url"],
             source.get("sheet"),
@@ -215,18 +237,24 @@ def get_all_sources():
             "type":      "excel",
             "start_row": 13
         },
-        # Any URL — type auto-detected
-         {
-             "url":     "https://docs.google.com/spreadsheets/d/1nAvvgPk0iMysrAx4TX30btTB-eUOcdAT/edit?gid=1467006846#gid=1467006846",
-             "sheet":  "GHIMS Incident Tracker",   # optional
-             "start_row": 13
-        },
-        # Native Google Sheet
+
+        # ── To add more sources, just paste the link: ──────────────────────
+        # Google Sheets link
         # {
-        #     "id":        "SPREADSHEET_ID",
+        #     "url":       "https://docs.google.com/spreadsheets/d/SHEET_ID/edit",
         #     "sheet":     "Sheet1",
-        #     "type":      "gsheet",
-        #     "start_row": 5
+        #     "start_row": 13
+        # },
+        # Google Drive Excel/CSV link
+        # {
+        #     "url":       "https://drive.google.com/file/d/FILE_ID/view",
+        #     "sheet":     "Sheet1",
+        #     "start_row": 13
+        # },
+        # SharePoint / OneDrive / any direct URL
+        # {
+        #     "url":       "https://company.sharepoint.com/file.xlsx",
+        #     "start_row": 13
         # },
     ]
 
@@ -292,14 +320,13 @@ def sync():
             return jsonify({"status": "error", "message": "Could not read master sheet"}), 500
 
         logging.info(f"Master has {len(id_to_row)} IDs, last row: {last_row}")
-        logging.info(f"Master ID sample: {list(id_to_row.keys())[:5]}")
 
         # ── STEP 1: Fetch sources → buffer ────────────────────────────────
         all_source_rows = {}
 
         if spreadsheet_id and sheet_name:
             logging.info(f"Targeted sync for {spreadsheet_id}/{sheet_name}")
-            matched = next((s for s in get_all_sources() if s.get("id") == spreadsheet_id), None)
+            matched     = next((s for s in get_all_sources() if s.get("id") == spreadsheet_id), None)
             source_data = get_source_data(client, matched) if matched else \
                           fetch_sheet(client, spreadsheet_id, sheet_name, 13)
             save_to_buffer(source_data, spreadsheet_id)
@@ -332,7 +359,6 @@ def sync():
                     time.sleep(15)
 
         logging.info(f"Total source rows: {len(all_source_rows)}")
-        logging.info(f"Source ID sample: {list(all_source_rows.keys())[:5]}")
 
         # ── STEP 2: Validate buffer ───────────────────────────────────────
         buffer           = load_from_buffer()
