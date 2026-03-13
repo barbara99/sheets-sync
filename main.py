@@ -437,6 +437,12 @@ def get_all_sources():
             "all_sheets":  True,
             "start_row":   13,
             "skip_sheets": []
+        }, 
+         {
+            "id":        "1NygRyFFrEOUYebY8ds52OPHaQBwV9WaAvsne5VWhg48",  # Abokobi Polyclinic
+            "all_sheets":  True,
+            "start_row":   2,
+            "skip_sheets": []
         },
         # ── All-sheets sources ─────────────────────────────────────────────
         # SharePoint — all tabs (make sure link is set to "Anyone with link can view")
