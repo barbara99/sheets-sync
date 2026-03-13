@@ -252,7 +252,7 @@ def get_all_sources():
             "sheet":     "GHIMS Incident Tracker",
             "type":      "excel",
             "start_row": 13
-        # },
+        },
         # SharePoint / OneDrive / any direct URL
         # {
         #     "url":       "https://company.sharepoint.com/file.xlsx",
