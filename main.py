@@ -54,7 +54,6 @@ def parse_excel(file_bytes, sheet_name, start_row):
 
     for row in ws.iter_rows(min_row=start_row, max_col=max_col, values_only=True):
         row_as_strings = [str(cell) if cell is not None else "" for cell in row]
-        # Skip completely empty rows only — never strip or shift columns
         if not any(cell.strip() for cell in row_as_strings):
             continue
         all_rows.append(row_as_strings)
@@ -70,7 +69,6 @@ def parse_csv(content, start_row):
     reader   = csv.reader(text.splitlines())
     all_rows = list(reader)
     data     = all_rows[start_row - 1:]
-    # Skip completely empty rows only — never strip or shift columns
     data     = [row for row in data if any(cell.strip() for cell in row)]
     return data
 
@@ -83,7 +81,6 @@ def fetch_sheet(client, spreadsheet_id, sheet_name, start_row):
             sheet    = ss.worksheet(sheet_name)
             all_rows = sheet.get_all_values()
             data     = all_rows[start_row - 1:]
-            # Skip completely empty rows only — never strip or shift columns
             data     = [row for row in data if any(cell.strip() for cell in row)]
             return data
         except Exception as e:
@@ -146,18 +143,15 @@ def detect_and_fetch_url(url, sheet_name, start_row):
         url_lower    = url.lower()
         logging.info(f"Content-Type: {content_type}")
 
-        # Detect Excel
         if any(x in content_type for x in ["excel", "spreadsheetml", "openxmlformats"]) or \
            any(url_lower.endswith(x) for x in [".xlsx", ".xls"]):
             logging.info("Detected: Excel")
             return parse_excel(io.BytesIO(response.content), sheet_name, start_row)
 
-        # Detect CSV
         elif "csv" in content_type or url_lower.endswith(".csv"):
             logging.info("Detected: CSV")
             return parse_csv(response.content, start_row)
 
-        # Try Excel first, then CSV
         else:
             logging.info("Unknown type — trying Excel first, then CSV")
             try:
@@ -178,6 +172,97 @@ def detect_and_fetch_url(url, sheet_name, start_row):
     except Exception as e:
         logging.error(f"Failed to fetch URL source {url}: {e}")
         return []
+
+# ── All-sheets helpers ────────────────────────────────────────────────────────
+
+def get_all_gsheet_names(client, spreadsheet_id):
+    """Get all sheet/tab names from a Google Spreadsheet."""
+    try:
+        ss = client.open_by_key(spreadsheet_id)
+        return [ws.title for ws in ss.worksheets()]
+    except Exception as e:
+        logging.error(f"Failed to get sheet names for {spreadsheet_id}: {e}")
+        return []
+
+def get_all_excel_sheet_names(file_bytes):
+    """Get all sheet/tab names from an Excel file bytes object."""
+    import openpyxl
+    workbook = openpyxl.load_workbook(file_bytes, data_only=True)
+    return workbook.sheetnames
+
+def fetch_all_sheets(client, source):
+    """Fetch data from ALL tabs in a source and combine into one list."""
+    start_row = source.get("start_row", 13)
+    all_rows  = []
+
+    if "url" in source:
+        url = source["url"]
+
+        # Google Sheets URL
+        if "docs.google.com/spreadsheets/d/" in url:
+            match = re.search(r"spreadsheets/d/([a-zA-Z0-9_-]+)", url)
+            if match:
+                spreadsheet_id = match.group(1)
+                sheet_names    = get_all_gsheet_names(client, spreadsheet_id)
+                logging.info(f"All-sheets: {len(sheet_names)} tabs in {spreadsheet_id}")
+                for name in sheet_names:
+                    rows = fetch_sheet(client, spreadsheet_id, name, start_row)
+                    logging.info(f"  Tab '{name}': {len(rows)} rows")
+                    all_rows.extend(rows)
+
+        # Google Drive Excel URL
+        elif "drive.google.com/file/d/" in url:
+            match = re.search(r"file/d/([a-zA-Z0-9_-]+)", url)
+            if match:
+                file_id       = match.group(1)
+                drive_service = get_drive_service()
+                file_bytes    = io.BytesIO(drive_service.files().get_media(fileId=file_id).execute())
+                sheet_names   = get_all_excel_sheet_names(file_bytes)
+                logging.info(f"All-sheets: {len(sheet_names)} tabs in Drive file {file_id}")
+                for name in sheet_names:
+                    file_bytes.seek(0)
+                    rows = parse_excel(file_bytes, name, start_row)
+                    logging.info(f"  Tab '{name}': {len(rows)} rows")
+                    all_rows.extend(rows)
+
+        # SharePoint / direct download URL
+        else:
+            import requests
+            response = requests.get(url, timeout=30, allow_redirects=True)
+            if response.status_code == 200:
+                file_bytes  = io.BytesIO(response.content)
+                sheet_names = get_all_excel_sheet_names(file_bytes)
+                logging.info(f"All-sheets: {len(sheet_names)} tabs from URL")
+                for name in sheet_names:
+                    file_bytes.seek(0)
+                    rows = parse_excel(file_bytes, name, start_row)
+                    logging.info(f"  Tab '{name}': {len(rows)} rows")
+                    all_rows.extend(rows)
+            else:
+                logging.error(f"Failed to download {url}: HTTP {response.status_code}")
+
+    elif source.get("type") == "excel":
+        # Google Drive Excel by file ID
+        drive_service = get_drive_service()
+        file_bytes    = io.BytesIO(drive_service.files().get_media(fileId=source["id"]).execute())
+        sheet_names   = get_all_excel_sheet_names(file_bytes)
+        logging.info(f"All-sheets: {len(sheet_names)} tabs in Drive Excel {source['id']}")
+        for name in sheet_names:
+            file_bytes.seek(0)
+            rows = parse_excel(file_bytes, name, start_row)
+            logging.info(f"  Tab '{name}': {len(rows)} rows")
+            all_rows.extend(rows)
+
+    else:
+        # Native Google Sheet by spreadsheet ID
+        sheet_names = get_all_gsheet_names(client, source["id"])
+        logging.info(f"All-sheets: {len(sheet_names)} tabs in {source['id']}")
+        for name in sheet_names:
+            rows = fetch_sheet(client, source["id"], name, start_row)
+            logging.info(f"  Tab '{name}': {len(rows)} rows")
+            all_rows.extend(rows)
+
+    return all_rows
 
 def fetch_master(client):
     try:
@@ -215,12 +300,12 @@ def fetch_master(client):
 def get_source_data(client, source):
     start_row = source.get("start_row", 13)
 
+    # all_sheets: True → fetch every tab and combine
+    if source.get("all_sheets"):
+        return fetch_all_sheets(client, source)
+
     if "url" in source:
-        return detect_and_fetch_url(
-            source["url"],
-            source.get("sheet"),
-            start_row
-        )
+        return detect_and_fetch_url(source["url"], source.get("sheet"), start_row)
     elif source.get("type") == "excel":
         return fetch_excel_source(source["id"], source["sheet"], start_row)
     else:
@@ -230,32 +315,54 @@ def get_source_data(client, source):
 
 def get_all_sources():
     return [
-        # Google Drive Excel file
+        # ── Single sheet sources ───────────────────────────────────────────
+
         {
-            "id":        "1pmtDOflpJ4ctaVLgp6BZs4zjv0Lhfvzt", # Tema General Hospital
+            "id":        "1pmtDOflpJ4ctaVLgp6BZs4zjv0Lhfvzt",  # Tema General Hospital
+            "sheet":     "GHIMS Incident Tracker",
+            "type":      "excel",
+            "start_row": 13
+        },
+        {
+            "id":        "1nAvvgPk0iMysrAx4TX30btTB-eUOcdAT",  # Adabraka Polyclinic
+            "sheet":     "GHIMS Incident Tracker",
+            "type":      "excel",
+            "start_row": 13
+        },
+        {
+            "id":        "1zZ3w_MeD86KqnbKOdNohDK1GLPI43yW7",  # Northern (needs sharing)
             "sheet":     "GHIMS Incident Tracker",
             "type":      "excel",
             "start_row": 13
         },
 
-        # ── To add more sources, just paste the link ───────────────────────
-        # Google Sheets link
-        {
-            "id":       "1nAvvgPk0iMysrAx4TX30btTB-eUOcdAT", # Adabraka Polyclinic
-            "sheet":     "GHIMS Incident Tracker",
-            "type":      "excel",
-            "start_row": 13
-        },
-        # Google Drive Excel/CSV link
-        {
-            "id":       "1zZ3w_MeD86KqnbKOdNohDK1GLPI43yW7", # Northern (Don't have edit access yet)
-            "sheet":     "GHIMS Incident Tracker",
-            "type":      "excel",
-            "start_row": 13
-        },
-        # SharePoint / OneDrive / any direct URL
+        # ── All-sheets sources (every tab gets pulled) ─────────────────────
+        # Google Drive Excel — all tabs
         # {
-        #     "url":       "https://company.sharepoint.com/file.xlsx",
+        #     "id":        "FILE_ID",
+        #     "type":      "excel",
+        #     "all_sheets": True,
+        #     "start_row": 13
+        # },
+
+        # Google Sheets URL — all tabs
+        {
+            "url":        "https://sptlgh-my.sharepoint.com/:x:/g/personal/solomon_odame_spagad_com/IQDiKJd6nTFtQ62uo7y7vyc6AcEGCKDR01APBsdVlt4tpRM?download=1",
+            "all_sheets": True,
+            "start_row":  13
+        },
+
+        # SharePoint / direct URL — all tabs
+        # {
+        #     "url":        "https://sptlgh-my.sharepoint.com/...?download=1",
+        #     "all_sheets": True,
+        #     "start_row":  13
+        # },
+
+        # ── Single-sheet URL sources ───────────────────────────────────────
+        # {
+        #     "url":       "https://sptlgh-my.sharepoint.com/...?download=1",
+        #     "sheet":     "GHIMS Incident Tracker",
         #     "start_row": 13
         # },
     ]
