@@ -480,7 +480,12 @@ def get_all_sources():
             "header_row":  11,
             "skip_sheets": ["DEMO INCIDENTS"]
         },
-        
+        {
+            "url":         "https://onedrive.live.com/:x:/g/personal/88741d10827ae2a0/IQAR1RU-_4mSRJdjMGcr-NjSAZWR6uFqao1CKPYmmUk0CD0?download=1", # Ahafo region
+            "all_sheets":  True,
+            "start_row":   13,
+            "skip_sheets": []
+        },
         
         # ── Templates for adding more sources ─────────────────────────────
         # Google Drive Excel — single sheet
