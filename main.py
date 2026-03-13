@@ -248,7 +248,7 @@ def get_all_sources():
         },
         # Google Drive Excel/CSV link
         {
-            "id":       "1zZ3w_MeD86KqnbKOdNohDK1GLPI43yW7", # Northern
+            "id":       "1zZ3w_MeD86KqnbKOdNohDK1GLPI43yW7", # Northern (Don't have edit access yet)
             "sheet":     "GHIMS Incident Tracker",
             "type":      "excel",
             "start_row": 13
