@@ -438,6 +438,12 @@ def get_all_sources():
             "type":      "excel",
             "start_row": 13
         },
+         {
+            "id":        "1e_jbwTS8s7Ah8gw-gXnxhDI8IgV-JcIX",  # Weija, pantang 
+            "all_sheets":   True,
+            "type":      "excel",
+            "start_row": 13
+        },
 
         # ── All-sheets sources ─────────────────────────────────────────────
         {
