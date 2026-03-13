@@ -486,6 +486,12 @@ def get_all_sources():
             "start_row":   13,
             "skip_sheets": []
         },
+        {
+            "url":         "https://onedrive.live.com/:x:/g/personal/e3f5d5574dc1389a/IQBRQt77xPg3QYtx4xmgpKorAddI8gf7q1NPFVoTLw5VybM?download=1", # Eatern region
+            "all_sheets":  True,
+            "start_row":   13,
+            "skip_sheets": []
+        },
         
         # ── Templates for adding more sources ─────────────────────────────
         # Google Drive Excel — single sheet
