@@ -459,7 +459,13 @@ def get_all_sources():
             "header_row":  1,
             "skip_sheets": []
         },
-
+        {
+            "id":          "1NNwHeVR3v-yWO9BwPR6cx0dDQjzvKttC7ZRcHRGW3HU",  # Ga east
+            "all_sheets":  True,
+            "start_row":   12,
+            "header_row":  11,
+            "skip_sheets": ["DEMO INCIDENTS"]
+        },
         # ── Templates for adding more sources ─────────────────────────────
         # Google Drive Excel — single sheet
         # {
