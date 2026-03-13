@@ -176,7 +176,7 @@ def detect_and_fetch_url(url, sheet_name, start_row):
 # ── All-sheets helpers ────────────────────────────────────────────────────────
 
 def get_all_gsheet_names(client, spreadsheet_id):
-    """Get all sheet/tab names from a Google Spreadsheet."""
+    """Get all tab names from a Google Spreadsheet."""
     try:
         ss = client.open_by_key(spreadsheet_id)
         return [ws.title for ws in ss.worksheets()]
@@ -185,15 +185,19 @@ def get_all_gsheet_names(client, spreadsheet_id):
         return []
 
 def get_all_excel_sheet_names(file_bytes):
-    """Get all sheet/tab names from an Excel file bytes object."""
+    """Get all tab names from an Excel file."""
     import openpyxl
-    workbook = openpyxl.load_workbook(file_bytes, data_only=True)
-    return workbook.sheetnames
+    workbook = openpyxl.load_workbook(file_bytes, data_only=True, read_only=True)
+    names    = workbook.sheetnames
+    workbook.close()
+    return names
 
 def fetch_all_sheets(client, source):
     """Fetch data from ALL tabs in a source and combine into one list."""
-    start_row = source.get("start_row", 13)
-    all_rows  = []
+    import openpyxl
+    start_row   = source.get("start_row", 13)
+    skip_sheets = source.get("skip_sheets", [])
+    all_rows    = []
 
     if "url" in source:
         url = source["url"]
@@ -206,9 +210,14 @@ def fetch_all_sheets(client, source):
                 sheet_names    = get_all_gsheet_names(client, spreadsheet_id)
                 logging.info(f"All-sheets: {len(sheet_names)} tabs in {spreadsheet_id}")
                 for name in sheet_names:
+                    if name in skip_sheets:
+                        logging.info(f"  Skipping tab '{name}'")
+                        continue
                     rows = fetch_sheet(client, spreadsheet_id, name, start_row)
                     logging.info(f"  Tab '{name}': {len(rows)} rows")
                     all_rows.extend(rows)
+            else:
+                logging.error(f"Could not extract ID from Google Sheets URL: {url}")
 
         # Google Drive Excel URL
         elif "drive.google.com/file/d/" in url:
@@ -217,47 +226,96 @@ def fetch_all_sheets(client, source):
                 file_id       = match.group(1)
                 drive_service = get_drive_service()
                 file_bytes    = io.BytesIO(drive_service.files().get_media(fileId=file_id).execute())
-                sheet_names   = get_all_excel_sheet_names(file_bytes)
+                workbook      = openpyxl.load_workbook(file_bytes, data_only=True, read_only=True)
+                sheet_names   = workbook.sheetnames
                 logging.info(f"All-sheets: {len(sheet_names)} tabs in Drive file {file_id}")
                 for name in sheet_names:
-                    file_bytes.seek(0)
-                    rows = parse_excel(file_bytes, name, start_row)
-                    logging.info(f"  Tab '{name}': {len(rows)} rows")
-                    all_rows.extend(rows)
+                    if name in skip_sheets:
+                        logging.info(f"  Skipping tab '{name}'")
+                        continue
+                    try:
+                        ws       = workbook[name]
+                        max_col  = ws.max_column
+                        tab_rows = []
+                        for row in ws.iter_rows(min_row=start_row, max_col=max_col, values_only=True):
+                            row_as_strings = [str(cell) if cell is not None else "" for cell in row]
+                            if not any(cell.strip() for cell in row_as_strings):
+                                continue
+                            tab_rows.append(row_as_strings)
+                        logging.info(f"  Tab '{name}': {len(tab_rows)} rows")
+                        all_rows.extend(tab_rows)
+                    except Exception as e:
+                        logging.warning(f"  Failed to read tab '{name}': {e}")
+                        continue
+                workbook.close()
+            else:
+                logging.error(f"Could not extract ID from Drive URL: {url}")
 
         # SharePoint / direct download URL
         else:
             import requests
-            response = requests.get(url, timeout=30, allow_redirects=True)
+            logging.info(f"Downloading file for all-sheets processing: {url}")
+            response = requests.get(url, timeout=60, allow_redirects=True)
             if response.status_code == 200:
-                file_bytes  = io.BytesIO(response.content)
-                sheet_names = get_all_excel_sheet_names(file_bytes)
+                workbook    = openpyxl.load_workbook(io.BytesIO(response.content), data_only=True, read_only=True)
+                sheet_names = workbook.sheetnames
                 logging.info(f"All-sheets: {len(sheet_names)} tabs from URL")
                 for name in sheet_names:
-                    file_bytes.seek(0)
-                    rows = parse_excel(file_bytes, name, start_row)
-                    logging.info(f"  Tab '{name}': {len(rows)} rows")
-                    all_rows.extend(rows)
+                    if name in skip_sheets:
+                        logging.info(f"  Skipping tab '{name}'")
+                        continue
+                    try:
+                        ws       = workbook[name]
+                        max_col  = ws.max_column
+                        tab_rows = []
+                        for row in ws.iter_rows(min_row=start_row, max_col=max_col, values_only=True):
+                            row_as_strings = [str(cell) if cell is not None else "" for cell in row]
+                            if not any(cell.strip() for cell in row_as_strings):
+                                continue
+                            tab_rows.append(row_as_strings)
+                        logging.info(f"  Tab '{name}': {len(tab_rows)} rows")
+                        all_rows.extend(tab_rows)
+                    except Exception as e:
+                        logging.warning(f"  Failed to read tab '{name}': {e}")
+                        continue
+                workbook.close()
             else:
                 logging.error(f"Failed to download {url}: HTTP {response.status_code}")
 
     elif source.get("type") == "excel":
-        # Google Drive Excel by file ID
         drive_service = get_drive_service()
         file_bytes    = io.BytesIO(drive_service.files().get_media(fileId=source["id"]).execute())
-        sheet_names   = get_all_excel_sheet_names(file_bytes)
+        workbook      = openpyxl.load_workbook(file_bytes, data_only=True, read_only=True)
+        sheet_names   = workbook.sheetnames
         logging.info(f"All-sheets: {len(sheet_names)} tabs in Drive Excel {source['id']}")
         for name in sheet_names:
-            file_bytes.seek(0)
-            rows = parse_excel(file_bytes, name, start_row)
-            logging.info(f"  Tab '{name}': {len(rows)} rows")
-            all_rows.extend(rows)
+            if name in skip_sheets:
+                logging.info(f"  Skipping tab '{name}'")
+                continue
+            try:
+                ws       = workbook[name]
+                max_col  = ws.max_column
+                tab_rows = []
+                for row in ws.iter_rows(min_row=start_row, max_col=max_col, values_only=True):
+                    row_as_strings = [str(cell) if cell is not None else "" for cell in row]
+                    if not any(cell.strip() for cell in row_as_strings):
+                        continue
+                    tab_rows.append(row_as_strings)
+                logging.info(f"  Tab '{name}': {len(tab_rows)} rows")
+                all_rows.extend(tab_rows)
+            except Exception as e:
+                logging.warning(f"  Failed to read tab '{name}': {e}")
+                continue
+        workbook.close()
 
     else:
         # Native Google Sheet by spreadsheet ID
         sheet_names = get_all_gsheet_names(client, source["id"])
         logging.info(f"All-sheets: {len(sheet_names)} tabs in {source['id']}")
         for name in sheet_names:
+            if name in skip_sheets:
+                logging.info(f"  Skipping tab '{name}'")
+                continue
             rows = fetch_sheet(client, source["id"], name, start_row)
             logging.info(f"  Tab '{name}': {len(rows)} rows")
             all_rows.extend(rows)
@@ -300,7 +358,6 @@ def fetch_master(client):
 def get_source_data(client, source):
     start_row = source.get("start_row", 13)
 
-    # all_sheets: True → fetch every tab and combine
     if source.get("all_sheets"):
         return fetch_all_sheets(client, source)
 
@@ -316,7 +373,6 @@ def get_source_data(client, source):
 def get_all_sources():
     return [
         # ── Single sheet sources ───────────────────────────────────────────
-
         {
             "id":        "1pmtDOflpJ4ctaVLgp6BZs4zjv0Lhfvzt",  # Tema General Hospital
             "sheet":     "GHIMS Incident Tracker",
@@ -336,30 +392,33 @@ def get_all_sources():
             "start_row": 13
         },
 
-        # ── All-sheets sources (every tab gets pulled) ─────────────────────
+        # ── All-sheets sources ─────────────────────────────────────────────
+        # SharePoint — all tabs, skip summary/dashboard tabs
+        {
+             "url":         "https://sptlgh-my.sharepoint.com/:x:/g/personal/solomon_odame_spagad_com/IQDiKJd6nTFtQ62uo7y7vyc6AcEGCKDR01APBsdVlt4tpRM?rtime=3mf0-_KA3kg?download=1",
+            "all_sheets":  True,
+            "start_row":   13,
+            "skip_sheets": []
+        },
+
         # Google Drive Excel — all tabs
         # {
-        #     "id":        "FILE_ID",
-        #     "type":      "excel",
-        #     "all_sheets": True,
-        #     "start_row": 13
+        #     "id":          "FILE_ID",
+        #     "type":        "excel",
+        #     "all_sheets":  True,
+        #     "start_row":   13,
+        #     "skip_sheets": ["Summary"]
         # },
 
         # Google Sheets URL — all tabs
-        {
-            "url":        "https://sptlgh-my.sharepoint.com/:x:/g/personal/solomon_odame_spagad_com/IQDiKJd6nTFtQ62uo7y7vyc6AcEGCKDR01APBsdVlt4tpRM?download=1",
-            "all_sheets": True,
-            "start_row":  13
-        },
-
-        # SharePoint / direct URL — all tabs
         # {
-        #     "url":        "https://sptlgh-my.sharepoint.com/...?download=1",
-        #     "all_sheets": True,
-        #     "start_row":  13
+        #     "url":         "https://docs.google.com/spreadsheets/d/SHEET_ID/edit",
+        #     "all_sheets":  True,
+        #     "start_row":   13,
+        #     "skip_sheets": ["Summary"]
         # },
 
-        # ── Single-sheet URL sources ───────────────────────────────────────
+        # ── Single sheet URL sources ───────────────────────────────────────
         # {
         #     "url":       "https://sptlgh-my.sharepoint.com/...?download=1",
         #     "sheet":     "GHIMS Incident Tracker",
