@@ -17,7 +17,7 @@ ID_COL       = 0
 MASTER_SS_ID = "1BkMncGrq2o26CF77x7ppuyM0xlOEJSA6xNeu7T5CIHQ"
 MASTER_SHEET = "Sheet7"
 MASTER_START = 13
-HEADER_ROW   = 12
+HEADER_ROW   = 12  # default header row for most sources
 BUFFER_FILE  = "/tmp/sync_buffer.json"
 
 SCOPES = [
@@ -59,7 +59,6 @@ def get_drive_service():
 # ── Column mapping ────────────────────────────────────────────────────────────
 
 def normalize_header(h):
-    """Strip whitespace and lowercase for fuzzy header matching."""
     return str(h).strip().lower()
 
 def map_row_to_master_columns(row, header_row):
@@ -77,8 +76,11 @@ def map_row_to_master_columns(row, header_row):
 
 # ── Parsers ───────────────────────────────────────────────────────────────────
 
-def parse_excel(file_bytes, sheet_name, start_row):
+def parse_excel(file_bytes, sheet_name, start_row, header_row_num=None):
     import openpyxl
+    if header_row_num is None:
+        header_row_num = HEADER_ROW
+
     workbook = openpyxl.load_workbook(file_bytes, data_only=True)
 
     if sheet_name and sheet_name in workbook.sheetnames:
@@ -90,11 +92,11 @@ def parse_excel(file_bytes, sheet_name, start_row):
     headers  = []
     all_rows = []
 
-    for i, row in enumerate(ws.iter_rows(min_row=HEADER_ROW, max_col=max_col, values_only=True)):
+    for i, row in enumerate(ws.iter_rows(min_row=header_row_num, max_col=max_col, values_only=True)):
         row_as_strings = [str(cell) if cell is not None else "" for cell in row]
-        actual_row_num = HEADER_ROW + i
+        actual_row_num = header_row_num + i
 
-        if actual_row_num == HEADER_ROW:
+        if actual_row_num == header_row_num:
             headers = row_as_strings
             continue
 
@@ -109,17 +111,20 @@ def parse_excel(file_bytes, sheet_name, start_row):
 
     return all_rows
 
-def parse_csv(content, start_row):
+def parse_csv(content, start_row, header_row_num=None):
     import csv
+    if header_row_num is None:
+        header_row_num = HEADER_ROW
+
     try:
         text = content.decode("utf-8")
     except:
         text = content.decode("latin-1")
+
     reader   = csv.reader(text.splitlines())
     all_rows = list(reader)
 
-    # Row 12 is the header, row 13 is data
-    headers   = all_rows[HEADER_ROW - 1] if len(all_rows) >= HEADER_ROW else []
+    headers   = all_rows[header_row_num - 1] if len(all_rows) >= header_row_num else []
     data_rows = all_rows[start_row - 1:]
     data_rows = [row for row in data_rows if any(cell.strip() for cell in row)]
     mapped    = [map_row_to_master_columns(row, headers) for row in data_rows]
@@ -127,14 +132,17 @@ def parse_csv(content, start_row):
 
 # ── Fetchers ──────────────────────────────────────────────────────────────────
 
-def fetch_sheet(client, spreadsheet_id, sheet_name, start_row):
+def fetch_sheet(client, spreadsheet_id, sheet_name, start_row, header_row_num=None):
+    if header_row_num is None:
+        header_row_num = HEADER_ROW
+
     for attempt in range(3):
         try:
             ss       = client.open_by_key(spreadsheet_id)
             sheet    = ss.worksheet(sheet_name)
             all_rows = sheet.get_all_values()
 
-            headers   = all_rows[HEADER_ROW - 1] if len(all_rows) >= HEADER_ROW else []
+            headers   = all_rows[header_row_num - 1] if len(all_rows) >= header_row_num else []
             data_rows = all_rows[start_row - 1:]
             data_rows = [row for row in data_rows if any(cell.strip() for cell in row)]
             mapped    = [map_row_to_master_columns(row, headers) for row in data_rows]
@@ -149,17 +157,17 @@ def fetch_sheet(client, spreadsheet_id, sheet_name, start_row):
                 return []
     return []
 
-def fetch_excel_source(file_id, sheet_name, start_row):
+def fetch_excel_source(file_id, sheet_name, start_row, header_row_num=None):
     try:
         drive_service = get_drive_service()
         request_obj   = drive_service.files().get_media(fileId=file_id)
         file_bytes    = io.BytesIO(request_obj.execute())
-        return parse_excel(file_bytes, sheet_name, start_row)
+        return parse_excel(file_bytes, sheet_name, start_row, header_row_num)
     except Exception as e:
         logging.error(f"Failed to read Excel file {file_id}: {e}")
         return []
 
-def detect_and_fetch_url(url, sheet_name, start_row):
+def detect_and_fetch_url(url, sheet_name, start_row, header_row_num=None):
     """Download file from any URL and auto-detect type."""
 
     # Google Sheets URL → use Sheets API
@@ -169,7 +177,7 @@ def detect_and_fetch_url(url, sheet_name, start_row):
             spreadsheet_id = match.group(1)
             logging.info(f"Google Sheets URL detected, using API: {spreadsheet_id}")
             client = get_client()
-            return fetch_sheet(client, spreadsheet_id, sheet_name or "Sheet1", start_row)
+            return fetch_sheet(client, spreadsheet_id, sheet_name or "Sheet1", start_row, header_row_num)
         else:
             logging.error(f"Could not extract ID from Google Sheets URL: {url}")
             return []
@@ -180,7 +188,7 @@ def detect_and_fetch_url(url, sheet_name, start_row):
         if match:
             file_id = match.group(1)
             logging.info(f"Google Drive URL detected, using Drive API: {file_id}")
-            return fetch_excel_source(file_id, sheet_name, start_row)
+            return fetch_excel_source(file_id, sheet_name, start_row, header_row_num)
         else:
             logging.error(f"Could not extract ID from Drive URL: {url}")
             return []
@@ -203,22 +211,22 @@ def detect_and_fetch_url(url, sheet_name, start_row):
         if any(x in content_type for x in ["excel", "spreadsheetml", "openxmlformats"]) or \
            any(url_lower.endswith(x) for x in [".xlsx", ".xls"]):
             logging.info("Detected: Excel")
-            return parse_excel(io.BytesIO(response.content), sheet_name, start_row)
+            return parse_excel(io.BytesIO(response.content), sheet_name, start_row, header_row_num)
 
         elif "csv" in content_type or url_lower.endswith(".csv"):
             logging.info("Detected: CSV")
-            return parse_csv(response.content, start_row)
+            return parse_csv(response.content, start_row, header_row_num)
 
         else:
             logging.info("Unknown type — trying Excel first, then CSV")
             try:
-                result = parse_excel(io.BytesIO(response.content), sheet_name, start_row)
+                result = parse_excel(io.BytesIO(response.content), sheet_name, start_row, header_row_num)
                 if result:
                     return result
             except:
                 pass
             try:
-                result = parse_csv(response.content, start_row)
+                result = parse_csv(response.content, start_row, header_row_num)
                 if result:
                     return result
             except:
@@ -233,7 +241,6 @@ def detect_and_fetch_url(url, sheet_name, start_row):
 # ── All-sheets helpers ────────────────────────────────────────────────────────
 
 def get_all_gsheet_names(client, spreadsheet_id):
-    """Get all tab names from a Google Spreadsheet."""
     try:
         ss = client.open_by_key(spreadsheet_id)
         return [ws.title for ws in ss.worksheets()]
@@ -241,11 +248,8 @@ def get_all_gsheet_names(client, spreadsheet_id):
         logging.error(f"Failed to get sheet names for {spreadsheet_id}: {e}")
         return []
 
-def process_workbook_all_sheets(workbook, skip_sheets, start_row):
-    """
-    Given an already-opened openpyxl workbook, read all tabs,
-    map columns, and return combined rows.
-    """
+def process_workbook_all_sheets(workbook, skip_sheets, start_row, header_row_num):
+    """Read all tabs from an openpyxl workbook, map columns, return combined rows."""
     all_rows = []
     for name in workbook.sheetnames:
         if name in skip_sheets:
@@ -257,11 +261,11 @@ def process_workbook_all_sheets(workbook, skip_sheets, start_row):
             headers  = []
             tab_rows = []
 
-            for i, row in enumerate(ws.iter_rows(min_row=HEADER_ROW, max_col=max_col, values_only=True)):
+            for i, row in enumerate(ws.iter_rows(min_row=header_row_num, max_col=max_col, values_only=True)):
                 row_as_strings = [str(cell) if cell is not None else "" for cell in row]
-                actual_row_num = HEADER_ROW + i
+                actual_row_num = header_row_num + i
 
-                if actual_row_num == HEADER_ROW:
+                if actual_row_num == header_row_num:
                     headers = row_as_strings
                     continue
 
@@ -286,9 +290,10 @@ def process_workbook_all_sheets(workbook, skip_sheets, start_row):
 def fetch_all_sheets(client, source):
     """Fetch data from ALL tabs in a source and combine into one list."""
     import openpyxl
-    start_row   = source.get("start_row", 13)
-    skip_sheets = source.get("skip_sheets", [])
-    all_rows    = []
+    start_row      = source.get("start_row", 13)
+    header_row_num = source.get("header_row", HEADER_ROW)
+    skip_sheets    = source.get("skip_sheets", [])
+    all_rows       = []
 
     if "url" in source:
         url = source["url"]
@@ -304,7 +309,7 @@ def fetch_all_sheets(client, source):
                     if name in skip_sheets:
                         logging.info(f"  Skipping tab '{name}'")
                         continue
-                    rows = fetch_sheet(client, spreadsheet_id, name, start_row)
+                    rows = fetch_sheet(client, spreadsheet_id, name, start_row, header_row_num)
                     logging.info(f"  Tab '{name}': {len(rows)} rows")
                     all_rows.extend(rows)
             else:
@@ -319,7 +324,7 @@ def fetch_all_sheets(client, source):
                 file_bytes    = io.BytesIO(drive_service.files().get_media(fileId=file_id).execute())
                 workbook      = openpyxl.load_workbook(file_bytes, data_only=True, read_only=True)
                 logging.info(f"All-sheets: {len(workbook.sheetnames)} tabs in Drive file {file_id}")
-                all_rows      = process_workbook_all_sheets(workbook, skip_sheets, start_row)
+                all_rows      = process_workbook_all_sheets(workbook, skip_sheets, start_row, header_row_num)
                 workbook.close()
             else:
                 logging.error(f"Could not extract ID from Drive URL: {url}")
@@ -332,11 +337,11 @@ def fetch_all_sheets(client, source):
             if response.status_code == 200:
                 content_type = response.headers.get("Content-Type", "").lower()
                 if "html" in content_type:
-                    logging.error(f"SharePoint returned an HTML page — link is not publicly accessible")
+                    logging.error("SharePoint returned an HTML page — link is not publicly accessible")
                     return []
                 workbook = openpyxl.load_workbook(io.BytesIO(response.content), data_only=True, read_only=True)
                 logging.info(f"All-sheets: {len(workbook.sheetnames)} tabs from URL")
-                all_rows = process_workbook_all_sheets(workbook, skip_sheets, start_row)
+                all_rows = process_workbook_all_sheets(workbook, skip_sheets, start_row, header_row_num)
                 workbook.close()
             else:
                 logging.error(f"Failed to download {url}: HTTP {response.status_code}")
@@ -346,7 +351,7 @@ def fetch_all_sheets(client, source):
         file_bytes    = io.BytesIO(drive_service.files().get_media(fileId=source["id"]).execute())
         workbook      = openpyxl.load_workbook(file_bytes, data_only=True, read_only=True)
         logging.info(f"All-sheets: {len(workbook.sheetnames)} tabs in Drive Excel {source['id']}")
-        all_rows      = process_workbook_all_sheets(workbook, skip_sheets, start_row)
+        all_rows      = process_workbook_all_sheets(workbook, skip_sheets, start_row, header_row_num)
         workbook.close()
 
     else:
@@ -357,7 +362,7 @@ def fetch_all_sheets(client, source):
             if name in skip_sheets:
                 logging.info(f"  Skipping tab '{name}'")
                 continue
-            rows = fetch_sheet(client, source["id"], name, start_row)
+            rows = fetch_sheet(client, source["id"], name, start_row, header_row_num)
             logging.info(f"  Tab '{name}': {len(rows)} rows")
             all_rows.extend(rows)
 
@@ -397,23 +402,24 @@ def fetch_master(client):
 # ── Source router ─────────────────────────────────────────────────────────────
 
 def get_source_data(client, source):
-    start_row = source.get("start_row", 13)
+    start_row      = source.get("start_row", 13)
+    header_row_num = source.get("header_row", HEADER_ROW)
 
     if source.get("all_sheets"):
         return fetch_all_sheets(client, source)
 
     if "url" in source:
-        return detect_and_fetch_url(source["url"], source.get("sheet"), start_row)
+        return detect_and_fetch_url(source["url"], source.get("sheet"), start_row, header_row_num)
     elif source.get("type") == "excel":
-        return fetch_excel_source(source["id"], source["sheet"], start_row)
+        return fetch_excel_source(source["id"], source["sheet"], start_row, header_row_num)
     else:
-        return fetch_sheet(client, source["id"], source["sheet"], start_row)
+        return fetch_sheet(client, source["id"], source["sheet"], start_row, header_row_num)
 
 # ── Source list ───────────────────────────────────────────────────────────────
 
 def get_all_sources():
     return [
-        # ── Single sheet sources ───────────────────────────────────────────
+        # ── Single sheet sources (headers on row 12, data from row 13) ────
         {
             "id":        "1pmtDOflpJ4ctaVLgp6BZs4zjv0Lhfvzt",  # Tema General Hospital
             "sheet":     "GHIMS Incident Tracker",
@@ -432,49 +438,50 @@ def get_all_sources():
             "type":      "excel",
             "start_row": 13
         },
+
+        # ── All-sheets sources ─────────────────────────────────────────────
         {
             "url":         "https://sptlgh-my.sharepoint.com/:x:/g/personal/solomon_odame_spagad_com/IQDiKJd6nTFtQ62uo7y7vyc6AcEGCKDR01APBsdVlt4tpRM?download=1",
             "all_sheets":  True,
             "start_row":   13,
             "skip_sheets": []
-        }, 
-         {
-            "id":        "1NygRyFFrEOUYebY8ds52OPHaQBwV9WaAvsne5VWhg48",  # Abokobi Polyclinic
+        },
+        {
+            "id":          "1NygRyFFrEOUYebY8ds52OPHaQBwV9WaAvsne5VWhg48",  # Abokobi Polyclinic
             "all_sheets":  True,
             "start_row":   2,
+            "header_row":  1,
             "skip_sheets": []
         },
-        # ── All-sheets sources ─────────────────────────────────────────────
-        # SharePoint — all tabs (make sure link is set to "Anyone with link can view")
+
+        # ── Templates for adding more sources ─────────────────────────────
+        # Google Drive Excel — single sheet
+        # {
+        #     "id":        "FILE_ID",
+        #     "sheet":     "GHIMS Incident Tracker",
+        #     "type":      "excel",
+        #     "start_row": 13
+        # },
+        # Google Sheet — single sheet
+        # {
+        #     "id":        "SHEET_ID",
+        #     "sheet":     "Sheet1",
+        #     "start_row": 13
+        # },
+        # Google Sheet — all tabs, custom header row
+        # {
+        #     "id":          "SHEET_ID",
+        #     "all_sheets":  True,
+        #     "start_row":   2,
+        #     "header_row":  1,
+        #     "skip_sheets": []
+        # },
+        # SharePoint / direct URL
         # {
         #     "url":         "https://sptlgh-my.sharepoint.com/...?download=1",
         #     "all_sheets":  True,
         #     "start_row":   13,
-        #     "skip_sheets": ["Summary", "Dashboard", "Contents"]
-        # },
-
-        # Google Drive Excel — all tabs
-        # {
-        #     "id":          "FILE_ID",
-        #     "type":        "excel",
-        #     "all_sheets":  True,
-        #     "start_row":   13,
-        #     "skip_sheets": ["Summary"]
-        # },
-
-        # Google Sheets URL — all tabs
-        # {
-        #     "url":         "https://docs.google.com/spreadsheets/d/SHEET_ID/edit",
-        #     "all_sheets":  True,
-        #     "start_row":   13,
-        #     "skip_sheets": []
-        # },
-
-        # ── Single sheet URL sources ───────────────────────────────────────
-        # {
-        #     "url":       "https://sptlgh-my.sharepoint.com/...?download=1",
-        #     "sheet":     "GHIMS Incident Tracker",
-        #     "start_row": 13
+        #     "skip_sheets": ["Summary", "Dashboard"]
         # },
     ]
 
