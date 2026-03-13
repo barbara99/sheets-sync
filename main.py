@@ -17,11 +17,29 @@ ID_COL       = 0
 MASTER_SS_ID = "1BkMncGrq2o26CF77x7ppuyM0xlOEJSA6xNeu7T5CIHQ"
 MASTER_SHEET = "Sheet7"
 MASTER_START = 13
+HEADER_ROW   = 12
 BUFFER_FILE  = "/tmp/sync_buffer.json"
 
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive"
+]
+
+MASTER_COLUMNS = [
+    "Incident ID",
+    "Incident State",
+    "Branch",
+    "Department",
+    "No.",
+    "Incident Description or Narration",
+    "Incident Reported by",
+    "Incident Documented By",
+    "Date Logged",
+    "Date Completed",
+    "Duration",
+    "Assigned To",
+    "Status",
+    "Comments"
 ]
 
 id_to_source = {}
@@ -38,6 +56,25 @@ def get_drive_service():
     creds      = Credentials.from_service_account_info(creds_json, scopes=SCOPES)
     return googleapiclient.discovery.build("drive", "v3", credentials=creds)
 
+# ── Column mapping ────────────────────────────────────────────────────────────
+
+def normalize_header(h):
+    """Strip whitespace and lowercase for fuzzy header matching."""
+    return str(h).strip().lower()
+
+def map_row_to_master_columns(row, header_row):
+    """
+    Align a source row to MASTER_COLUMNS using header names.
+    Any column not found in the source is left blank.
+    """
+    source_map = {}
+    for i, h in enumerate(header_row):
+        key = normalize_header(h)
+        if key:
+            source_map[key] = row[i] if i < len(row) else ""
+
+    return [source_map.get(normalize_header(col), "") for col in MASTER_COLUMNS]
+
 # ── Parsers ───────────────────────────────────────────────────────────────────
 
 def parse_excel(file_bytes, sheet_name, start_row):
@@ -50,13 +87,25 @@ def parse_excel(file_bytes, sheet_name, start_row):
         ws = workbook.active
 
     max_col  = ws.max_column
+    headers  = []
     all_rows = []
 
-    for row in ws.iter_rows(min_row=start_row, max_col=max_col, values_only=True):
+    for i, row in enumerate(ws.iter_rows(min_row=HEADER_ROW, max_col=max_col, values_only=True)):
         row_as_strings = [str(cell) if cell is not None else "" for cell in row]
+        actual_row_num = HEADER_ROW + i
+
+        if actual_row_num == HEADER_ROW:
+            headers = row_as_strings
+            continue
+
+        if actual_row_num < start_row:
+            continue
+
         if not any(cell.strip() for cell in row_as_strings):
             continue
-        all_rows.append(row_as_strings)
+
+        mapped = map_row_to_master_columns(row_as_strings, headers)
+        all_rows.append(mapped)
 
     return all_rows
 
@@ -68,9 +117,13 @@ def parse_csv(content, start_row):
         text = content.decode("latin-1")
     reader   = csv.reader(text.splitlines())
     all_rows = list(reader)
-    data     = all_rows[start_row - 1:]
-    data     = [row for row in data if any(cell.strip() for cell in row)]
-    return data
+
+    # Row 12 is the header, row 13 is data
+    headers   = all_rows[HEADER_ROW - 1] if len(all_rows) >= HEADER_ROW else []
+    data_rows = all_rows[start_row - 1:]
+    data_rows = [row for row in data_rows if any(cell.strip() for cell in row)]
+    mapped    = [map_row_to_master_columns(row, headers) for row in data_rows]
+    return mapped
 
 # ── Fetchers ──────────────────────────────────────────────────────────────────
 
@@ -80,9 +133,13 @@ def fetch_sheet(client, spreadsheet_id, sheet_name, start_row):
             ss       = client.open_by_key(spreadsheet_id)
             sheet    = ss.worksheet(sheet_name)
             all_rows = sheet.get_all_values()
-            data     = all_rows[start_row - 1:]
-            data     = [row for row in data if any(cell.strip() for cell in row)]
-            return data
+
+            headers   = all_rows[HEADER_ROW - 1] if len(all_rows) >= HEADER_ROW else []
+            data_rows = all_rows[start_row - 1:]
+            data_rows = [row for row in data_rows if any(cell.strip() for cell in row)]
+            mapped    = [map_row_to_master_columns(row, headers) for row in data_rows]
+            return mapped
+
         except Exception as e:
             if "429" in str(e) or "quota" in str(e).lower():
                 logging.warning(f"Rate limited, waiting 30s... (attempt {attempt + 1})")
@@ -133,7 +190,7 @@ def detect_and_fetch_url(url, sheet_name, start_row):
         import requests
 
         logging.info(f"Downloading from URL: {url}")
-        response = requests.get(url, timeout=30, allow_redirects=True)
+        response = requests.get(url, timeout=60, allow_redirects=True)
 
         if response.status_code != 200:
             logging.error(f"Failed to download {url}: HTTP {response.status_code}")
@@ -184,13 +241,47 @@ def get_all_gsheet_names(client, spreadsheet_id):
         logging.error(f"Failed to get sheet names for {spreadsheet_id}: {e}")
         return []
 
-def get_all_excel_sheet_names(file_bytes):
-    """Get all tab names from an Excel file."""
-    import openpyxl
-    workbook = openpyxl.load_workbook(file_bytes, data_only=True, read_only=True)
-    names    = workbook.sheetnames
-    workbook.close()
-    return names
+def process_workbook_all_sheets(workbook, skip_sheets, start_row):
+    """
+    Given an already-opened openpyxl workbook, read all tabs,
+    map columns, and return combined rows.
+    """
+    all_rows = []
+    for name in workbook.sheetnames:
+        if name in skip_sheets:
+            logging.info(f"  Skipping tab '{name}'")
+            continue
+        try:
+            ws       = workbook[name]
+            max_col  = ws.max_column
+            headers  = []
+            tab_rows = []
+
+            for i, row in enumerate(ws.iter_rows(min_row=HEADER_ROW, max_col=max_col, values_only=True)):
+                row_as_strings = [str(cell) if cell is not None else "" for cell in row]
+                actual_row_num = HEADER_ROW + i
+
+                if actual_row_num == HEADER_ROW:
+                    headers = row_as_strings
+                    continue
+
+                if actual_row_num < start_row:
+                    continue
+
+                if not any(cell.strip() for cell in row_as_strings):
+                    continue
+
+                mapped = map_row_to_master_columns(row_as_strings, headers)
+                tab_rows.append(mapped)
+
+            logging.info(f"  Tab '{name}': {len(tab_rows)} rows")
+            all_rows.extend(tab_rows)
+
+        except Exception as e:
+            logging.warning(f"  Failed to read tab '{name}': {e}")
+            continue
+
+    return all_rows
 
 def fetch_all_sheets(client, source):
     """Fetch data from ALL tabs in a source and combine into one list."""
@@ -227,26 +318,8 @@ def fetch_all_sheets(client, source):
                 drive_service = get_drive_service()
                 file_bytes    = io.BytesIO(drive_service.files().get_media(fileId=file_id).execute())
                 workbook      = openpyxl.load_workbook(file_bytes, data_only=True, read_only=True)
-                sheet_names   = workbook.sheetnames
-                logging.info(f"All-sheets: {len(sheet_names)} tabs in Drive file {file_id}")
-                for name in sheet_names:
-                    if name in skip_sheets:
-                        logging.info(f"  Skipping tab '{name}'")
-                        continue
-                    try:
-                        ws       = workbook[name]
-                        max_col  = ws.max_column
-                        tab_rows = []
-                        for row in ws.iter_rows(min_row=start_row, max_col=max_col, values_only=True):
-                            row_as_strings = [str(cell) if cell is not None else "" for cell in row]
-                            if not any(cell.strip() for cell in row_as_strings):
-                                continue
-                            tab_rows.append(row_as_strings)
-                        logging.info(f"  Tab '{name}': {len(tab_rows)} rows")
-                        all_rows.extend(tab_rows)
-                    except Exception as e:
-                        logging.warning(f"  Failed to read tab '{name}': {e}")
-                        continue
+                logging.info(f"All-sheets: {len(workbook.sheetnames)} tabs in Drive file {file_id}")
+                all_rows      = process_workbook_all_sheets(workbook, skip_sheets, start_row)
                 workbook.close()
             else:
                 logging.error(f"Could not extract ID from Drive URL: {url}")
@@ -257,27 +330,13 @@ def fetch_all_sheets(client, source):
             logging.info(f"Downloading file for all-sheets processing: {url}")
             response = requests.get(url, timeout=60, allow_redirects=True)
             if response.status_code == 200:
-                workbook    = openpyxl.load_workbook(io.BytesIO(response.content), data_only=True, read_only=True)
-                sheet_names = workbook.sheetnames
-                logging.info(f"All-sheets: {len(sheet_names)} tabs from URL")
-                for name in sheet_names:
-                    if name in skip_sheets:
-                        logging.info(f"  Skipping tab '{name}'")
-                        continue
-                    try:
-                        ws       = workbook[name]
-                        max_col  = ws.max_column
-                        tab_rows = []
-                        for row in ws.iter_rows(min_row=start_row, max_col=max_col, values_only=True):
-                            row_as_strings = [str(cell) if cell is not None else "" for cell in row]
-                            if not any(cell.strip() for cell in row_as_strings):
-                                continue
-                            tab_rows.append(row_as_strings)
-                        logging.info(f"  Tab '{name}': {len(tab_rows)} rows")
-                        all_rows.extend(tab_rows)
-                    except Exception as e:
-                        logging.warning(f"  Failed to read tab '{name}': {e}")
-                        continue
+                content_type = response.headers.get("Content-Type", "").lower()
+                if "html" in content_type:
+                    logging.error(f"SharePoint returned an HTML page — link is not publicly accessible")
+                    return []
+                workbook = openpyxl.load_workbook(io.BytesIO(response.content), data_only=True, read_only=True)
+                logging.info(f"All-sheets: {len(workbook.sheetnames)} tabs from URL")
+                all_rows = process_workbook_all_sheets(workbook, skip_sheets, start_row)
                 workbook.close()
             else:
                 logging.error(f"Failed to download {url}: HTTP {response.status_code}")
@@ -286,26 +345,8 @@ def fetch_all_sheets(client, source):
         drive_service = get_drive_service()
         file_bytes    = io.BytesIO(drive_service.files().get_media(fileId=source["id"]).execute())
         workbook      = openpyxl.load_workbook(file_bytes, data_only=True, read_only=True)
-        sheet_names   = workbook.sheetnames
-        logging.info(f"All-sheets: {len(sheet_names)} tabs in Drive Excel {source['id']}")
-        for name in sheet_names:
-            if name in skip_sheets:
-                logging.info(f"  Skipping tab '{name}'")
-                continue
-            try:
-                ws       = workbook[name]
-                max_col  = ws.max_column
-                tab_rows = []
-                for row in ws.iter_rows(min_row=start_row, max_col=max_col, values_only=True):
-                    row_as_strings = [str(cell) if cell is not None else "" for cell in row]
-                    if not any(cell.strip() for cell in row_as_strings):
-                        continue
-                    tab_rows.append(row_as_strings)
-                logging.info(f"  Tab '{name}': {len(tab_rows)} rows")
-                all_rows.extend(tab_rows)
-            except Exception as e:
-                logging.warning(f"  Failed to read tab '{name}': {e}")
-                continue
+        logging.info(f"All-sheets: {len(workbook.sheetnames)} tabs in Drive Excel {source['id']}")
+        all_rows      = process_workbook_all_sheets(workbook, skip_sheets, start_row)
         workbook.close()
 
     else:
@@ -391,15 +432,20 @@ def get_all_sources():
             "type":      "excel",
             "start_row": 13
         },
-
-        # ── All-sheets sources ─────────────────────────────────────────────
-        # SharePoint — all tabs, skip summary/dashboard tabs
         {
-             "url":         "https://sptlgh-my.sharepoint.com/:x:/g/personal/solomon_odame_spagad_com/IQDiKJd6nTFtQ62uo7y7vyc6AcEGCKDR01APBsdVlt4tpRM?download=1",
+            "url":         "https://sptlgh-my.sharepoint.com/:x:/g/personal/solomon_odame_spagad_com/IQDiKJd6nTFtQ62uo7y7vyc6AcEGCKDR01APBsdVlt4tpRM?download=1",
             "all_sheets":  True,
             "start_row":   13,
             "skip_sheets": []
         },
+        # ── All-sheets sources ─────────────────────────────────────────────
+        # SharePoint — all tabs (make sure link is set to "Anyone with link can view")
+        # {
+        #     "url":         "https://sptlgh-my.sharepoint.com/...?download=1",
+        #     "all_sheets":  True,
+        #     "start_row":   13,
+        #     "skip_sheets": ["Summary", "Dashboard", "Contents"]
+        # },
 
         # Google Drive Excel — all tabs
         # {
@@ -415,7 +461,7 @@ def get_all_sources():
         #     "url":         "https://docs.google.com/spreadsheets/d/SHEET_ID/edit",
         #     "all_sheets":  True,
         #     "start_row":   13,
-        #     "skip_sheets": ["Summary"]
+        #     "skip_sheets": []
         # },
 
         # ── Single sheet URL sources ───────────────────────────────────────
