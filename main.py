@@ -247,10 +247,11 @@ def get_all_sources():
             "start_row": 13
         },
         # Google Drive Excel/CSV link
-        # {
-        #     "url":       "https://drive.google.com/file/d/FILE_ID/view",
-        #     "sheet":     "Sheet1",
-        #     "start_row": 13
+        {
+            "id":       "1zZ3w_MeD86KqnbKOdNohDK1GLPI43yW7", # Northern
+            "sheet":     "GHIMS Incident Tracker",
+            "type":      "excel",
+            "start_row": 13
         # },
         # SharePoint / OneDrive / any direct URL
         # {
