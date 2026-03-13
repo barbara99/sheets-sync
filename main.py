@@ -395,7 +395,7 @@ def get_all_sources():
         # ── All-sheets sources ─────────────────────────────────────────────
         # SharePoint — all tabs, skip summary/dashboard tabs
         {
-             "url":         "https://sptlgh-my.sharepoint.com/:x:/g/personal/solomon_odame_spagad_com/IQDiKJd6nTFtQ62uo7y7vyc6AcEGCKDR01APBsdVlt4tpRM?rtime=3mf0-_KA3kg?download=1",
+             "url":         "https://sptlgh-my.sharepoint.com/:x:/g/personal/solomon_odame_spagad_com/IQDiKJd6nTFtQ62uo7y7vyc6AcEGCKDR01APBsdVlt4tpRM?download=1",
             "all_sheets":  True,
             "start_row":   13,
             "skip_sheets": []
