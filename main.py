@@ -473,6 +473,14 @@ def get_all_sources():
             "header_row":  10,
             "skip_sheets": ["DEMO INCIDENTS"]
         },
+        {
+            "id":          "1OHL2RusmPioUik8sdA_nQG4Hjr1d8fg4mnqpAvTzNl",  # Ridge
+            "all_sheets":  True,
+            "start_row":   12,
+            "header_row":  11,
+            "skip_sheets": ["DEMO INCIDENTS"]
+        },
+        
         
         # ── Templates for adding more sources ─────────────────────────────
         # Google Drive Excel — single sheet
