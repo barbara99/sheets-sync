@@ -475,7 +475,7 @@ def get_all_sources():
         },
         {
             "id":          "1OHL2RusmPioUik8sdA_nQG4Hjr1d8fg4mnqpAvTzNlI",   # Ridge
-            "all_sheets":  True,
+            "all_sheets":  True, 
             "start_row":   12,
             "header_row":  11,
             "skip_sheets": ["DEMO INCIDENTS"]
