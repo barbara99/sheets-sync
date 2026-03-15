@@ -14,10 +14,11 @@ app = Flask(__name__)
 logging.basicConfig(level=logging.INFO)
 
 ID_COL       = 0
+DEPT_COL     = 3  # Column D = "Department" (0-indexed)
 MASTER_SS_ID = "1BkMncGrq2o26CF77x7ppuyM0xlOEJSA6xNeu7T5CIHQ"
 MASTER_SHEET = "Sheet7"
 MASTER_START = 13
-HEADER_ROW   = 12  # default header row for most sources
+HEADER_ROW   = 12
 BUFFER_FILE  = "/tmp/sync_buffer.json"
 
 SCOPES = [
@@ -302,9 +303,8 @@ def fetch_all_sheets_gsheet_batch(client, spreadsheet_id, skip_sheets, start_row
         if not sheet_names:
             return []
 
-        # Build one range per tab — fetch everything in a single API call
-        ranges  = [f"'{name}'!A1:ZZ" for name in sheet_names]
-        result  = ss.values_batch_get(ranges)
+        ranges    = [f"'{name}'!A1:ZZ" for name in sheet_names]
+        result    = ss.values_batch_get(ranges)
         responses = result.get("valueRanges", [])
 
         for i, name in enumerate(sheet_names):
@@ -385,7 +385,6 @@ def fetch_all_sheets(client, source):
             return all_rows
 
     elif source.get("type") == "excel":
-        # Google Drive Excel file by ID
         drive_service = get_drive_service()
         file_bytes    = io.BytesIO(drive_service.files().get_media(fileId=source["id"]).execute())
         workbook      = openpyxl.load_workbook(file_bytes, data_only=True, read_only=True)
@@ -430,6 +429,89 @@ def fetch_master(client):
     except Exception as e:
         logging.error(f"Failed to fetch master: {e}")
         return None, {}, {}, MASTER_START - 1
+
+# ── Department splitter ───────────────────────────────────────────────────────
+
+def split_by_department(client):
+    """
+    Read the master sheet and create/update one tab per department.
+    Each tab gets the same header row (row 12) plus its filtered rows.
+    Rows with no department go to 'Unassigned'.
+    Tabs for departments that no longer exist are cleared but kept.
+    """
+    try:
+        ss       = client.open_by_key(MASTER_SS_ID)
+        master   = ss.worksheet(MASTER_SHEET)
+        all_rows = master.get_all_values()
+
+        if len(all_rows) < MASTER_START:
+            logging.info("Department split: master sheet has no data rows yet")
+            return
+
+        header_row = all_rows[HEADER_ROW - 1]     # row 12 (index 11)
+        data_rows  = all_rows[MASTER_START - 1:]   # row 13 onwards
+        data_rows  = [row for row in data_rows if any(cell.strip() for cell in row)]
+
+        # Group rows by department
+        dept_map = {}
+        for row in data_rows:
+            dept = row[DEPT_COL].strip() if len(row) > DEPT_COL else ""
+            if not dept:
+                dept = "Unassigned"
+            if dept not in dept_map:
+                dept_map[dept] = []
+            dept_map[dept].append(row)
+
+        logging.info(f"Department split: {len(dept_map)} departments — {list(dept_map.keys())}")
+
+        existing_titles = [ws.title for ws in ss.worksheets()]
+
+        # Sheets we must never touch
+        protected = {MASTER_SHEET}
+
+        for dept, rows in dept_map.items():
+            sheet_title = dept[:100]  # Google Sheets tab name limit
+
+            # Skip if it would overwrite a protected sheet
+            if sheet_title in protected:
+                logging.warning(f"  Skipping '{sheet_title}' — name conflicts with a protected sheet")
+                continue
+
+            try:
+                if sheet_title in existing_titles:
+                    ws = ss.worksheet(sheet_title)
+                    ws.clear()
+                    logging.info(f"  Cleared existing tab '{sheet_title}'")
+                else:
+                    ws = ss.add_worksheet(
+                        title=sheet_title,
+                        rows=max(len(rows) + 20, 100),
+                        cols=len(header_row)
+                    )
+                    logging.info(f"  Created new tab '{sheet_title}'")
+
+                # Rows 1–11 blank (to match master layout), row 12 = header, row 13+ = data
+                blank_rows = [[""] * len(header_row)] * (HEADER_ROW - 1)
+                write_data = blank_rows + [header_row] + rows
+
+                # Pad all rows to the same width
+                max_cols   = max(len(r) for r in write_data)
+                write_data = [r + [""] * (max_cols - len(r)) for r in write_data]
+
+                ws.update("A1", write_data, value_input_option="RAW")
+                logging.info(f"  Written {len(rows)} rows to tab '{sheet_title}'")
+
+                # Small pause to avoid hitting write quota
+                time.sleep(1)
+
+            except Exception as e:
+                logging.error(f"  Failed to update tab '{sheet_title}': {e}")
+                continue
+
+        logging.info("Department split complete.")
+
+    except Exception as e:
+        logging.error(f"Department split error: {e}")
 
 # ── Source router ─────────────────────────────────────────────────────────────
 
@@ -752,6 +834,10 @@ def sync():
         clear_buffer()
         logging.info("Sync complete. Buffer cleared.")
 
+        # ── STEP 8: Split master by department ────────────────────────────
+        logging.info("Running department split...")
+        split_by_department(client)
+
         return jsonify({
             "status":                   "ok",
             "new":                      len(new_rows),
@@ -800,6 +886,17 @@ def dedupe():
 
     except Exception as e:
         logging.error(f"Dedupe error: {e}")
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+@app.route("/split", methods=["POST"])
+def split():
+    """Manually trigger the department split without running a full sync."""
+    try:
+        client = get_client()
+        split_by_department(client)
+        return jsonify({"status": "ok", "message": "Department split complete"}), 200
+    except Exception as e:
+        logging.error(f"Split error: {e}")
         return jsonify({"status": "error", "message": str(e)}), 500
 
 @app.route("/buffer", methods=["GET"])
