@@ -287,6 +287,48 @@ def process_workbook_all_sheets(workbook, skip_sheets, start_row, header_row_num
 
     return all_rows
 
+def fetch_all_sheets_gsheet_batch(client, spreadsheet_id, skip_sheets, start_row, header_row_num):
+    """
+    Fetch ALL tabs from a Google Sheet in a SINGLE batch API call.
+    Much faster than fetching tab by tab — avoids timeout on large sheets.
+    """
+    all_rows = []
+    try:
+        ss          = client.open_by_key(spreadsheet_id)
+        worksheets  = ss.worksheets()
+        sheet_names = [ws.title for ws in worksheets if ws.title not in skip_sheets]
+        logging.info(f"All-sheets batch: {len(sheet_names)} tabs in {spreadsheet_id}")
+
+        if not sheet_names:
+            return []
+
+        # Build one range per tab — fetch everything in a single API call
+        ranges  = [f"'{name}'!A1:ZZ" for name in sheet_names]
+        result  = ss.values_batch_get(ranges)
+        responses = result.get("valueRanges", [])
+
+        for i, name in enumerate(sheet_names):
+            try:
+                tab_values = responses[i].get("values", []) if i < len(responses) else []
+                if not tab_values:
+                    logging.info(f"  Tab '{name}': 0 rows (empty)")
+                    continue
+
+                headers   = tab_values[header_row_num - 1] if len(tab_values) >= header_row_num else []
+                data_rows = tab_values[start_row - 1:]
+                data_rows = [row for row in data_rows if any(str(cell).strip() for cell in row)]
+                mapped    = [map_row_to_master_columns(row, headers) for row in data_rows]
+                logging.info(f"  Tab '{name}': {len(mapped)} rows")
+                all_rows.extend(mapped)
+            except Exception as e:
+                logging.warning(f"  Failed to process tab '{name}': {e}")
+                continue
+
+    except Exception as e:
+        logging.error(f"Failed to batch fetch {spreadsheet_id}: {e}")
+
+    return all_rows
+
 def fetch_all_sheets(client, source):
     """Fetch data from ALL tabs in a source and combine into one list."""
     import openpyxl
@@ -298,22 +340,16 @@ def fetch_all_sheets(client, source):
     if "url" in source:
         url = source["url"]
 
-        # Google Sheets URL
+        # Google Sheets URL → batch fetch
         if "docs.google.com/spreadsheets/d/" in url:
             match = re.search(r"spreadsheets/d/([a-zA-Z0-9_-]+)", url)
             if match:
-                spreadsheet_id = match.group(1)
-                sheet_names    = get_all_gsheet_names(client, spreadsheet_id)
-                logging.info(f"All-sheets: {len(sheet_names)} tabs in {spreadsheet_id}")
-                for name in sheet_names:
-                    if name in skip_sheets:
-                        logging.info(f"  Skipping tab '{name}'")
-                        continue
-                    rows = fetch_sheet(client, spreadsheet_id, name, start_row, header_row_num)
-                    logging.info(f"  Tab '{name}': {len(rows)} rows")
-                    all_rows.extend(rows)
+                return fetch_all_sheets_gsheet_batch(
+                    client, match.group(1), skip_sheets, start_row, header_row_num
+                )
             else:
                 logging.error(f"Could not extract ID from Google Sheets URL: {url}")
+                return []
 
         # Google Drive Excel URL
         elif "drive.google.com/file/d/" in url:
@@ -328,8 +364,9 @@ def fetch_all_sheets(client, source):
                 workbook.close()
             else:
                 logging.error(f"Could not extract ID from Drive URL: {url}")
+            return all_rows
 
-        # SharePoint / direct download URL
+        # SharePoint / OneDrive / direct download URL
         else:
             import requests
             logging.info(f"Downloading file for all-sheets processing: {url}")
@@ -337,7 +374,7 @@ def fetch_all_sheets(client, source):
             if response.status_code == 200:
                 content_type = response.headers.get("Content-Type", "").lower()
                 if "html" in content_type:
-                    logging.error("SharePoint returned an HTML page — link is not publicly accessible")
+                    logging.error("URL returned an HTML page — link may not be publicly accessible")
                     return []
                 workbook = openpyxl.load_workbook(io.BytesIO(response.content), data_only=True, read_only=True)
                 logging.info(f"All-sheets: {len(workbook.sheetnames)} tabs from URL")
@@ -345,28 +382,23 @@ def fetch_all_sheets(client, source):
                 workbook.close()
             else:
                 logging.error(f"Failed to download {url}: HTTP {response.status_code}")
+            return all_rows
 
     elif source.get("type") == "excel":
+        # Google Drive Excel file by ID
         drive_service = get_drive_service()
         file_bytes    = io.BytesIO(drive_service.files().get_media(fileId=source["id"]).execute())
         workbook      = openpyxl.load_workbook(file_bytes, data_only=True, read_only=True)
         logging.info(f"All-sheets: {len(workbook.sheetnames)} tabs in Drive Excel {source['id']}")
         all_rows      = process_workbook_all_sheets(workbook, skip_sheets, start_row, header_row_num)
         workbook.close()
+        return all_rows
 
     else:
-        # Native Google Sheet by spreadsheet ID
-        sheet_names = get_all_gsheet_names(client, source["id"])
-        logging.info(f"All-sheets: {len(sheet_names)} tabs in {source['id']}")
-        for name in sheet_names:
-            if name in skip_sheets:
-                logging.info(f"  Skipping tab '{name}'")
-                continue
-            rows = fetch_sheet(client, source["id"], name, start_row, header_row_num)
-            logging.info(f"  Tab '{name}': {len(rows)} rows")
-            all_rows.extend(rows)
-
-    return all_rows
+        # Native Google Sheet by ID → batch fetch
+        return fetch_all_sheets_gsheet_batch(
+            client, source["id"], skip_sheets, start_row, header_row_num
+        )
 
 def fetch_master(client):
     try:
@@ -438,8 +470,8 @@ def get_all_sources():
             "type":      "excel",
             "start_row": 13
         },
-         {
-            "id":        "1e_jbwTS8s7Ah8gw-gXnxhDI8IgV-JcIX",  # Weija, pantang 
+        {
+            "id":        "1e_jbwTS8s7Ah8gw-gXnxhDI8IgV-JcIX",  # Weija, pantang
             "all_sheets":   True,
             "type":      "excel",
             "start_row": 13
@@ -474,32 +506,32 @@ def get_all_sources():
             "skip_sheets": ["DEMO INCIDENTS"]
         },
         {
-            "id":          "1OHL2RusmPioUik8sdA_nQG4Hjr1d8fg4mnqpAvTzNlI",   # Ridge
-            "all_sheets":  True, 
+            "id":          "1OHL2RusmPioUik8sdA_nQG4Hjr1d8fg4mnqpAvTzNlI",  # Ridge
+            "all_sheets":  True,
             "start_row":   12,
             "header_row":  11,
             "skip_sheets": ["DEMO INCIDENTS"]
         },
         {
-            "url":         "https://onedrive.live.com/:x:/g/personal/88741d10827ae2a0/IQAR1RU-_4mSRJdjMGcr-NjSAZWR6uFqao1CKPYmmUk0CD0?download=1", # Ahafo region
+            "url":         "https://onedrive.live.com/:x:/g/personal/88741d10827ae2a0/IQAR1RU-_4mSRJdjMGcr-NjSAZWR6uFqao1CKPYmmUk0CD0?download=1",  # Ahafo region
             "all_sheets":  True,
             "start_row":   13,
             "skip_sheets": []
         },
         {
-            "url":         "https://onedrive.live.com/:x:/g/personal/e3f5d5574dc1389a/IQBRQt77xPg3QYtx4xmgpKorAddI8gf7q1NPFVoTLw5VybM?download=1", # Eatern region
+            "url":         "https://onedrive.live.com/:x:/g/personal/e3f5d5574dc1389a/IQBRQt77xPg3QYtx4xmgpKorAddI8gf7q1NPFVoTLw5VybM?download=1",  # Eastern region
             "all_sheets":  True,
             "start_row":   13,
             "skip_sheets": []
         },
         {
-            "id":          "19DYqpFRD9bFlIa9UDQx45U5jSTZDsc0_7MedtuaaI9U",   # Werstern North
-            "all_sheets":  True, 
+            "id":          "19DYqpFRD9bFlIa9UDQx45U5jSTZDsc0_7MedtuaaI9U",  # Western North
+            "all_sheets":  True,
             "start_row":   13,
             "header_row":  12,
             "skip_sheets": ["[FACILITIES DEPARTMENT LISTINGS]", "Common Issues Tracker"]
         },
-        
+
         # ── Templates for adding more sources ─────────────────────────────
         # Google Drive Excel — single sheet
         # {
@@ -522,7 +554,7 @@ def get_all_sources():
         #     "header_row":  1,
         #     "skip_sheets": []
         # },
-        # SharePoint / direct URL
+        # SharePoint / OneDrive / direct URL
         # {
         #     "url":         "https://sptlgh-my.sharepoint.com/...?download=1",
         #     "all_sheets":  True,
