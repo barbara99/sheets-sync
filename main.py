@@ -492,6 +492,13 @@ def get_all_sources():
             "start_row":   13,
             "skip_sheets": []
         },
+        {
+            "id":          "19DYqpFRD9bFlIa9UDQx45U5jSTZDsc0_7MedtuaaI9U",   # Werstern North
+            "all_sheets":  True, 
+            "start_row":   13,
+            "header_row":  12,
+            "skip_sheets": ["[FACILITIES DEPARTMENT LISTINGS]", "Common Issues Tracker"]
+        },
         
         # ── Templates for adding more sources ─────────────────────────────
         # Google Drive Excel — single sheet
